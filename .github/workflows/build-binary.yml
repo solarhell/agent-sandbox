@@ -44,16 +44,13 @@ jobs:
         run: |
           mkdir -p dist
           install -m 0755 target/release/agent-sandbox dist/agent-sandbox-linux-x86_64
-          (cd dist && sha256sum agent-sandbox-linux-x86_64 > agent-sandbox-linux-x86_64.sha256)
-          cat dist/agent-sandbox-linux-x86_64.sha256
+          ls -lh dist/agent-sandbox-linux-x86_64
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: agent-sandbox-linux-x86_64
-          path: |
-            dist/agent-sandbox-linux-x86_64
-            dist/agent-sandbox-linux-x86_64.sha256
+          path: dist/agent-sandbox-linux-x86_64
           if-no-files-found: error
           retention-days: 30
 
@@ -65,5 +62,4 @@ jobs:
           gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --notes "agent-sandbox $TAG_NAME"
           gh release upload "$TAG_NAME" \
             dist/agent-sandbox-linux-x86_64 \
-            dist/agent-sandbox-linux-x86_64.sha256 \
             --clobber
