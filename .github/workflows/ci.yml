@@ -18,12 +18,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap protobuf-compiler ripgrep
+          sudo chmod u+s "$(command -v bwrap)"
+          ls -l "$(command -v bwrap)"
           bwrap --version
           protoc --version
           rg --version
 
       - name: Set up Buf
         uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
 
       - name: Verify Buf
         run: buf --version
