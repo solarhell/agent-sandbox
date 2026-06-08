@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - "v*"
+      - "*.*.*"
 
 jobs:
   linux-x86_64:
@@ -33,8 +34,10 @@ jobs:
 
       - name: Package artifact
         run: |
-          mkdir -p dist/agent-sandbox-linux-x86_64
-          cp target/release/agent-sandbox dist/agent-sandbox-linux-x86_64/
+          mkdir -p dist/agent-sandbox-linux-x86_64/bin
+          install -m 0755 target/release/agent-sandbox dist/agent-sandbox-linux-x86_64/bin/agent-sandbox
+          cp dist/agent-sandbox-linux-x86_64/bin/agent-sandbox dist/agent-sandbox-linux-x86_64/bin/agent-sandbox-server
+          cp dist/agent-sandbox-linux-x86_64/bin/agent-sandbox dist/agent-sandbox-linux-x86_64/bin/agent-sandbox-daemon
           cp README.md dist/agent-sandbox-linux-x86_64/
           tar -C dist -czf dist/agent-sandbox-linux-x86_64.tar.gz agent-sandbox-linux-x86_64
           (cd dist && sha256sum agent-sandbox-linux-x86_64.tar.gz > agent-sandbox-linux-x86_64.tar.gz.sha256)
