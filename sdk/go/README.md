@@ -5,6 +5,7 @@ Go client for the `agent-sandbox` gRPC daemon.
 The daemon runs commands with real `bash --noprofile --norc -c`, so host shell profiles and rc files are not loaded.
 It also starts commands with a cleared environment. SDK callers may set ordinary env values, but reserved runner keys such as `PATH`, `HOME`, `PWD`, `TMPDIR`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, and `CDPATH` are rejected.
 On Linux, the bubblewrap runner also applies a Landlock execute allowlist so files created in the workspace cannot be run as `./tool`.
+Network socket syscalls are denied inside sandboxed bash commands with a Linux seccomp filter.
 
 ```go
 package main

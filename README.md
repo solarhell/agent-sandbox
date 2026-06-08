@@ -118,10 +118,10 @@ The bubblewrap runner:
 - exposes only the requested external binaries under a clean sandbox `/bin`;
 - disables unlisted bash builtins before executing the user command;
 - applies a Linux Landlock execute allowlist inside the sandbox so workspace-created executables such as `./tool` cannot run;
+- applies a Linux seccomp filter that denies network socket syscalls;
 - mounts common system library directories read-only;
 - uses an isolated `/tmp`, `/proc`, and `/dev`;
 - clears inherited environment variables and sets `HOME`, `PWD`, `TMPDIR`, `PATH`, and `LANG`;
-- unshares network namespaces, so network is off by default;
 - rejects `cwd` values that escape `/workspace`.
 
 ```bash

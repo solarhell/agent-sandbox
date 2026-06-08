@@ -3,7 +3,7 @@ mod imp {
     use std::{ffi::OsStr, path::PathBuf, process::Command};
 
     use landlock::{
-        ABI, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+        AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
         RulesetCreatedAttr, RulesetStatus,
     };
 
@@ -40,6 +40,7 @@ mod imp {
                 .filter(|path| path.exists()),
         );
         restrict_execute(&allowed_paths)?;
+        crate::seccomp_net::install_network_deny_filter()?;
         Err(Command::new("/sandbox-runtime/bash")
             .arg("--noprofile")
             .arg("--norc")

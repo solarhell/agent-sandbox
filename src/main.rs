@@ -3,6 +3,8 @@ mod cli;
 mod landlock_exec;
 mod proto;
 mod runner;
+#[cfg(target_os = "linux")]
+mod seccomp_net;
 mod service;
 mod store;
 mod workspace_locks;

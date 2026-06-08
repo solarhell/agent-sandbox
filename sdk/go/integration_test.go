@@ -248,6 +248,21 @@ func TestIntegrationExposedBinariesControlExternalToolsAndBuiltins(t *testing.T)
 	if workspaceTool.ExitCode == 0 {
 		t.Fatalf("workspace executable succeeded: stdout=%q stderr=%q", workspaceTool.StdoutString(), workspaceTool.StderrString())
 	}
+
+	network, err := client.RunBashReadWrite(ctx, `: >/dev/tcp/127.0.0.1/1`,
+		ExposedBinaries(":"),
+		Timeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("RunBashReadWrite with bash /dev/tcp returned RPC error: %v", err)
+	}
+	if network.ExitCode == 0 {
+		t.Fatalf("network socket unexpectedly succeeded: stdout=%q stderr=%q", network.StdoutString(), network.StderrString())
+	}
+	networkStderr := network.StderrString()
+	if !strings.Contains(networkStderr, "Permission denied") && !strings.Contains(networkStderr, "Operation not permitted") {
+		t.Fatalf("network socket stderr = %q", networkStderr)
+	}
 }
 
 func seedReActCorpus(t *testing.T, worktreePath string) {

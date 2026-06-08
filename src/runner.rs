@@ -55,6 +55,7 @@ impl SandboxRunner {
         }
         which::which("bwrap").context("failed to locate `bwrap`")?;
         which::which("bash").context("failed to locate `bash`")?;
+        probe_bubblewrap().context("failed to verify bubblewrap namespace support")?;
         landlock_exec::probe().context("failed to verify Landlock execute allowlist support")?;
         Ok(())
     }
@@ -91,8 +92,11 @@ impl SandboxRunner {
         command
             .env_clear()
             .arg("--die-with-parent")
-            .arg("--unshare-all")
-            .arg("--unshare-net")
+            .arg("--unshare-user")
+            .arg("--unshare-ipc")
+            .arg("--unshare-pid")
+            .arg("--unshare-uts")
+            .arg("--unshare-cgroup")
             .arg("--new-session")
             .arg("--clearenv")
             .arg("--proc")
@@ -167,6 +171,34 @@ impl SandboxRunner {
 
         run_child(command, spec.timeout, "bubblewrap").await
     }
+}
+
+fn probe_bubblewrap() -> anyhow::Result<()> {
+    let bwrap_path = which::which("bwrap").context("failed to locate `bwrap`")?;
+    let output = std::process::Command::new(bwrap_path)
+        .env_clear()
+        .arg("--die-with-parent")
+        .arg("--unshare-user")
+        .arg("--unshare-ipc")
+        .arg("--unshare-pid")
+        .arg("--unshare-uts")
+        .arg("--unshare-cgroup")
+        .arg("--new-session")
+        .arg("--clearenv")
+        .arg("--ro-bind")
+        .arg("/")
+        .arg("/")
+        .arg("/bin/true")
+        .output()
+        .context("failed to run bubblewrap probe")?;
+    if !output.status.success() {
+        bail!(
+            "bubblewrap probe failed: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
 }
 
 async fn run_child(
