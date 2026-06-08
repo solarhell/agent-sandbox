@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package agentsandbox.v1;
+
+option go_package = "github.com/agent-sandbox/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1";
+
+service AgentSandboxService {
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse);
+  rpc BindWorkspace(BindWorkspaceRequest) returns (BindWorkspaceResponse);
+  rpc Run(RunRequest) returns (RunResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
+  rpc GetOperation(GetOperationRequest) returns (GetOperationResponse);
+}
+
+message CreateWorkspaceRequest {
+  string workspace_id = 1;
+}
+
+message CreateWorkspaceResponse {
+  Workspace workspace = 1;
+}
+
+message Workspace {
+  string workspace_id = 1;
+  string worktree_path = 2;
+  string tree_hash = 3;
+  WorkspaceKind kind = 4;
+}
+
+enum WorkspaceKind {
+  WORKSPACE_KIND_UNSPECIFIED = 0;
+  WORKSPACE_KIND_MANAGED = 1;
+  WORKSPACE_KIND_LOCAL_BOUND = 2;
+}
+
+message BindWorkspaceRequest {
+  string workspace_id = 1;
+  WorkspaceBinding binding = 2;
+}
+
+message WorkspaceBinding {
+  oneof source {
+    LocalWorkspaceBinding local = 1;
+  }
+}
+
+message LocalWorkspaceBinding {
+  string path = 1;
+  bool create_if_missing = 2;
+}
+
+message BindWorkspaceResponse {
+  Workspace workspace = 1;
+}
+
+message RunRequest {
+  string workspace_id = 1;
+  string command = 2;
+  string cwd = 3;
+  map<string, string> env = 4;
+  repeated string exposed_binaries = 5;
+  uint64 timeout_ms = 6;
+  PolicyMode policy_mode = 7;
+}
+
+enum PolicyMode {
+  POLICY_MODE_UNSPECIFIED = 0;
+  POLICY_MODE_READ_WRITE = 1;
+  POLICY_MODE_READ_ONLY = 2;
+}
+
+message RunResponse {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  string runner = 4;
+  string op_id = 5;
+  string before_tree_hash = 6;
+  string after_tree_hash = 7;
+  bool changed = 8;
+  RunAudit audit = 9;
+}
+
+message RunAudit {
+  string request_id = 1;
+  string workspace_id = 2;
+  string cwd = 3;
+  repeated string exposed_binaries = 4;
+  uint64 timeout_ms = 5;
+  uint64 duration_ms = 6;
+  string runner = 7;
+  int64 started_at_unix_ms = 8;
+  int64 finished_at_unix_ms = 9;
+  uint64 stdout_bytes = 10;
+  uint64 stderr_bytes = 11;
+  PolicyMode policy_mode = 12;
+}
+
+message StatusRequest {
+  string workspace_id = 1;
+}
+
+message StatusResponse {
+  Workspace workspace = 1;
+  string runner = 2;
+}
+
+message Operation {
+  string op_id = 1;
+  string command = 2;
+  int32 exit_code = 3;
+  string before_tree_hash = 4;
+  string after_tree_hash = 5;
+  bool changed = 6;
+  RunAudit audit = 7;
+}
+
+message ListOperationsRequest {
+  string workspace_id = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListOperationsResponse {
+  repeated Operation operations = 1;
+  string next_page_token = 2;
+}
+
+message GetOperationRequest {
+  string workspace_id = 1;
+  string op_id = 2;
+}
+
+message GetOperationResponse {
+  Operation operation = 1;
+}
