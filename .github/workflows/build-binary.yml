@@ -2,10 +2,18 @@ name: Build Binary
 
 on:
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to upload assets to"
+        required: true
+        default: "0.0.1"
   push:
     tags:
       - "v*"
       - "*.*.*"
+
+permissions:
+  contents: write
 
 jobs:
   linux-x86_64:
@@ -32,23 +40,30 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
-      - name: Package artifact
+      - name: Package binary
         run: |
-          mkdir -p dist/agent-sandbox-linux-x86_64/bin
-          install -m 0755 target/release/agent-sandbox dist/agent-sandbox-linux-x86_64/bin/agent-sandbox
-          cp dist/agent-sandbox-linux-x86_64/bin/agent-sandbox dist/agent-sandbox-linux-x86_64/bin/agent-sandbox-server
-          cp dist/agent-sandbox-linux-x86_64/bin/agent-sandbox dist/agent-sandbox-linux-x86_64/bin/agent-sandbox-daemon
-          cp README.md dist/agent-sandbox-linux-x86_64/
-          tar -C dist -czf dist/agent-sandbox-linux-x86_64.tar.gz agent-sandbox-linux-x86_64
-          (cd dist && sha256sum agent-sandbox-linux-x86_64.tar.gz > agent-sandbox-linux-x86_64.tar.gz.sha256)
-          cat dist/agent-sandbox-linux-x86_64.tar.gz.sha256
+          mkdir -p dist
+          install -m 0755 target/release/agent-sandbox dist/agent-sandbox-linux-x86_64
+          (cd dist && sha256sum agent-sandbox-linux-x86_64 > agent-sandbox-linux-x86_64.sha256)
+          cat dist/agent-sandbox-linux-x86_64.sha256
 
-      - name: Upload binary artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: agent-sandbox-linux-x86_64
           path: |
-            dist/agent-sandbox-linux-x86_64.tar.gz
-            dist/agent-sandbox-linux-x86_64.tar.gz.sha256
+            dist/agent-sandbox-linux-x86_64
+            dist/agent-sandbox-linux-x86_64.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+        run: |
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --notes "agent-sandbox $TAG_NAME"
+          gh release upload "$TAG_NAME" \
+            dist/agent-sandbox-linux-x86_64 \
+            dist/agent-sandbox-linux-x86_64.sha256 \
+            --clobber
