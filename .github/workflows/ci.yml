@@ -22,6 +22,12 @@ jobs:
           protoc --version
           rg --version
 
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Verify Buf
+        run: buf --version
+
       - name: Set up Rust
         run: |
           rustup toolchain install stable --profile minimal
