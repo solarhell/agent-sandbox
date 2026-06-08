@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	agentsandboxv1 "github.com/agent-sandbox/agent-sandbox/sdk/go/proto/agentsandbox/v1"
+	agentsandboxv1 "github.com/solarhell/agent-sandbox/sdk/go/proto/agentsandbox/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

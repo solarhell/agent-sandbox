@@ -1,0 +1,51 @@
+name: Build Binary
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64 binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package artifact
+        run: |
+          mkdir -p dist/agent-sandbox-linux-x86_64
+          cp target/release/agent-sandbox dist/agent-sandbox-linux-x86_64/
+          cp README.md dist/agent-sandbox-linux-x86_64/
+          tar -C dist -czf dist/agent-sandbox-linux-x86_64.tar.gz agent-sandbox-linux-x86_64
+          (cd dist && sha256sum agent-sandbox-linux-x86_64.tar.gz > agent-sandbox-linux-x86_64.tar.gz.sha256)
+          cat dist/agent-sandbox-linux-x86_64.tar.gz.sha256
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: agent-sandbox-linux-x86_64
+          path: |
+            dist/agent-sandbox-linux-x86_64.tar.gz
+            dist/agent-sandbox-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30

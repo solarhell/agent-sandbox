@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package agentsandbox.v1;
 
-option go_package = "github.com/agent-sandbox/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1";
+option go_package = "github.com/solarhell/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1";
 
 service AgentSandboxService {
   rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse);

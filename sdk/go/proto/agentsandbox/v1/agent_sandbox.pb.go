@@ -1327,7 +1327,7 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\x03Run\x12\x1b.agentsandbox.v1.RunRequest\x1a\x1c.agentsandbox.v1.RunResponse\x12I\n" +
 	"\x06Status\x12\x1e.agentsandbox.v1.StatusRequest\x1a\x1f.agentsandbox.v1.StatusResponse\x12a\n" +
 	"\x0eListOperations\x12&.agentsandbox.v1.ListOperationsRequest\x1a'.agentsandbox.v1.ListOperationsResponse\x12[\n" +
-	"\fGetOperation\x12$.agentsandbox.v1.GetOperationRequest\x1a%.agentsandbox.v1.GetOperationResponseBTZRgithub.com/agent-sandbox/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1b\x06proto3"
+	"\fGetOperation\x12$.agentsandbox.v1.GetOperationRequest\x1a%.agentsandbox.v1.GetOperationResponseBPZNgithub.com/solarhell/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1b\x06proto3"
 
 var (
 	file_agentsandbox_v1_agent_sandbox_proto_rawDescOnce sync.Once

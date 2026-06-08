@@ -1,6 +1,6 @@
 package agentsandbox
 
-import agentsandboxv1 "github.com/agent-sandbox/agent-sandbox/sdk/go/proto/agentsandbox/v1"
+import agentsandboxv1 "github.com/solarhell/agent-sandbox/sdk/go/proto/agentsandbox/v1"
 
 type Workspace struct {
 	WorkspaceID  string

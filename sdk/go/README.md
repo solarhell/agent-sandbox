@@ -16,7 +16,7 @@ import (
 	"log"
 	"time"
 
-	agentsandbox "github.com/agent-sandbox/agent-sandbox/sdk/go"
+	agentsandbox "github.com/solarhell/agent-sandbox/sdk/go"
 )
 
 func main() {

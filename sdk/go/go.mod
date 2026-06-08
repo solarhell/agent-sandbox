@@ -1,4 +1,4 @@
-module github.com/agent-sandbox/agent-sandbox/sdk/go
+module github.com/solarhell/agent-sandbox/sdk/go
 
 go 1.26
 
