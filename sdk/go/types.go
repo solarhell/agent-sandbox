@@ -26,15 +26,20 @@ type WorkspaceStatus struct {
 }
 
 type RunResult struct {
-	ExitCode       int32
-	Stdout         []byte
-	Stderr         []byte
-	Runner         string
-	OpID           string
-	BeforeTreeHash string
-	AfterTreeHash  string
-	Changed        bool
-	Audit          *RunAudit
+	ExitCode        uint64
+	Stdout          []byte
+	Stderr          []byte
+	Runner          string
+	OpID            string
+	BeforeTreeHash  string
+	AfterTreeHash   string
+	Changed         bool
+	Audit           *RunAudit
+	StdoutTruncated bool
+	StderrTruncated bool
+	// TimedOut reports that the command hit its timeout and was killed.
+	// Stdout/Stderr hold the output produced before the kill; ExitCode is 124.
+	TimedOut bool
 }
 
 type PolicyMode string
@@ -53,16 +58,17 @@ type RunAudit struct {
 	TimeoutMs        uint64
 	DurationMs       uint64
 	Runner           string
-	StartedAtUnixMs  int64
-	FinishedAtUnixMs int64
+	StartedAtUnixMs  uint64
+	FinishedAtUnixMs uint64
 	StdoutBytes      uint64
 	StderrBytes      uint64
+	TimedOut         bool
 }
 
 type Operation struct {
 	OpID           string
 	Command        string
-	ExitCode       int32
+	ExitCode       uint64
 	BeforeTreeHash string
 	AfterTreeHash  string
 	Changed        bool
@@ -130,15 +136,18 @@ func runResultFromProto(result *agentsandboxv1.RunResponse) *RunResult {
 		return nil
 	}
 	return &RunResult{
-		ExitCode:       result.GetExitCode(),
-		Stdout:         append([]byte(nil), result.GetStdout()...),
-		Stderr:         append([]byte(nil), result.GetStderr()...),
-		Runner:         result.GetRunner(),
-		OpID:           result.GetOpId(),
-		BeforeTreeHash: result.GetBeforeTreeHash(),
-		AfterTreeHash:  result.GetAfterTreeHash(),
-		Changed:        result.GetChanged(),
-		Audit:          runAuditFromProto(result.GetAudit()),
+		ExitCode:        result.GetExitCode(),
+		Stdout:          append([]byte(nil), result.GetStdout()...),
+		Stderr:          append([]byte(nil), result.GetStderr()...),
+		Runner:          result.GetRunner(),
+		OpID:            result.GetOpId(),
+		BeforeTreeHash:  result.GetBeforeTreeHash(),
+		AfterTreeHash:   result.GetAfterTreeHash(),
+		Changed:         result.GetChanged(),
+		Audit:           runAuditFromProto(result.GetAudit()),
+		StdoutTruncated: result.GetStdoutTruncated(),
+		StderrTruncated: result.GetStderrTruncated(),
+		TimedOut:        result.GetTimedOut(),
 	}
 }
 
@@ -159,6 +168,7 @@ func runAuditFromProto(audit *agentsandboxv1.RunAudit) *RunAudit {
 		FinishedAtUnixMs: audit.GetFinishedAtUnixMs(),
 		StdoutBytes:      audit.GetStdoutBytes(),
 		StderrBytes:      audit.GetStderrBytes(),
+		TimedOut:         audit.GetTimedOut(),
 	}
 }
 

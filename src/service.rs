@@ -12,9 +12,10 @@ use uuid::Uuid;
 use crate::{
     proto::v1::{
         BindWorkspaceRequest, BindWorkspaceResponse, CreateWorkspaceRequest,
-        CreateWorkspaceResponse, GetOperationRequest, GetOperationResponse, ListOperationsRequest,
-        ListOperationsResponse, Operation, RunAudit, RunRequest, RunResponse, StatusRequest,
-        StatusResponse, Workspace, WorkspaceKind,
+        CreateWorkspaceResponse, DeleteWorkspaceRequest, DeleteWorkspaceResponse,
+        GetOperationRequest, GetOperationResponse, ListOperationsRequest, ListOperationsResponse,
+        Operation, RunAudit, RunRequest, RunResponse, StatusRequest, StatusResponse, Workspace,
+        WorkspaceKind,
         agent_sandbox_service_server::{
             AgentSandboxService as AgentSandboxServiceRpc, AgentSandboxServiceServer,
         },
@@ -23,32 +24,105 @@ use crate::{
     runner::{
         ExposedBinary, FilesystemMode, RunSpec, SandboxRunner, is_bash_builtin, validate_user_env,
     },
-    store::{RunAuditInput, WorkspaceKind as StoreWorkspaceKind, WorkspaceStore},
+    store::{RunAuditInput, WorkspaceKind as StoreWorkspaceKind, WorkspaceStore, hash_tree},
     workspace_locks::WorkspaceLocks,
 };
+
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+// Caps keep the worst-case RunResponse comfortably under tonic's default
+// 4 MiB message limit (stdout + stderr + envelope).
+const DEFAULT_MAX_STDOUT_BYTES: u64 = 1_048_576;
+const DEFAULT_MAX_STDERR_BYTES: u64 = 262_144;
+const HARD_MAX_OUTPUT_BYTES: u64 = 1_572_864;
+
+#[derive(Debug, Clone)]
+pub struct ServiceOptions {
+    /// Server-side ceiling for RunRequest.timeout_ms.
+    pub max_run_timeout_ms: u64,
+    /// Operation log entries kept per workspace; 0 keeps everything.
+    pub max_ops_per_workspace: usize,
+}
+
+impl Default for ServiceOptions {
+    fn default() -> Self {
+        Self {
+            max_run_timeout_ms: 1_800_000,
+            max_ops_per_workspace: 1_000,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentSandboxService {
     store: Arc<WorkspaceStore>,
     runner: SandboxRunner,
     workspace_locks: Arc<WorkspaceLocks>,
+    max_run_timeout_ms: u64,
+    /// Last committed after-tree-hash per managed workspace. Managed worktrees
+    /// are only mutated by this daemon under the workspace lock, so the cached
+    /// hash is a valid before-hash for the next run and saves a full tree walk.
+    tree_hash_cache: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 impl AgentSandboxService {
-    pub fn new(state_dir: PathBuf, allowed_bind_roots: Vec<PathBuf>) -> anyhow::Result<Self> {
+    pub fn new(
+        state_dir: PathBuf,
+        allowed_bind_roots: Vec<PathBuf>,
+        options: ServiceOptions,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             store: Arc::new(WorkspaceStore::with_allowed_bind_roots(
                 state_dir,
                 allowed_bind_roots,
+                options.max_ops_per_workspace,
             )?),
             runner: SandboxRunner::new(),
             workspace_locks: Arc::new(WorkspaceLocks::default()),
+            max_run_timeout_ms: options.max_run_timeout_ms.max(1),
+            tree_hash_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
     pub fn into_server(self) -> AgentSandboxServiceServer<Self> {
         AgentSandboxServiceServer::new(self)
     }
+
+    /// Runs a blocking store/filesystem closure off the async runtime.
+    async fn run_blocking<T, F>(&self, task: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(Arc<WorkspaceStore>) -> anyhow::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || task(store))
+            .await
+            .context("store task panicked")?
+    }
+
+    fn cached_tree_hash(&self, workspace_id: &str) -> Option<String> {
+        self.tree_hash_cache
+            .lock()
+            .ok()?
+            .get(workspace_id)
+            .cloned()
+    }
+
+    fn store_tree_hash(&self, workspace_id: &str, tree_hash: &str) {
+        if let Ok(mut cache) = self.tree_hash_cache.lock() {
+            cache.insert(workspace_id.to_string(), tree_hash.to_string());
+        }
+    }
+
+    fn evict_tree_hash(&self, workspace_id: &str) {
+        if let Ok(mut cache) = self.tree_hash_cache.lock() {
+            cache.remove(workspace_id);
+        }
+    }
+}
+
+fn effective_output_cap(requested: u64, default: u64) -> usize {
+    let cap = if requested == 0 { default } else { requested };
+    cap.min(HARD_MAX_OUTPUT_BYTES) as usize
 }
 
 #[tonic::async_trait]
@@ -58,9 +132,10 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
         request: Request<CreateWorkspaceRequest>,
     ) -> Result<Response<CreateWorkspaceResponse>, Status> {
         let request = request.into_inner();
+        let workspace_id = nonempty(request.workspace_id);
         let info = self
-            .store
-            .create_workspace(nonempty(request.workspace_id))
+            .run_blocking(move |store| store.create_workspace(workspace_id))
+            .await
             .map_err(internal)?;
         Ok(Response::new(CreateWorkspaceResponse {
             workspace: Some(workspace(info)),
@@ -80,15 +155,22 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
             .source
             .ok_or_else(|| Status::invalid_argument("binding source is required"))?;
         let info = match source {
-            workspace_binding::Source::Local(local) => self
-                .store
-                .bind_local_workspace(
-                    &workspace_id,
-                    PathBuf::from(local.path).as_path(),
-                    local.create_if_missing,
-                )
-                .map_err(invalid)?,
+            workspace_binding::Source::Local(local) => {
+                let id = workspace_id.clone();
+                self.run_blocking(move |store| {
+                    store.bind_local_workspace(
+                        &id,
+                        PathBuf::from(local.path).as_path(),
+                        local.create_if_missing,
+                    )
+                })
+                .await
+                .map_err(invalid)?
+            }
         };
+        // The workspace may now point at a different (externally writable)
+        // worktree; any cached hash is stale.
+        self.evict_tree_hash(&workspace_id);
         Ok(Response::new(BindWorkspaceResponse {
             workspace: Some(workspace(info)),
         }))
@@ -110,10 +192,16 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
         let requested_exposed_binaries = request.exposed_binaries;
         let env = request.env;
         let timeout_ms = if request.timeout_ms == 0 {
-            30_000
+            DEFAULT_TIMEOUT_MS
         } else {
             request.timeout_ms
-        };
+        }
+        .min(self.max_run_timeout_ms);
+        let skip_tree_hash = request.skip_tree_hash;
+        let max_stdout_bytes =
+            effective_output_cap(request.max_stdout_bytes, DEFAULT_MAX_STDOUT_BYTES);
+        let max_stderr_bytes =
+            effective_output_cap(request.max_stderr_bytes, DEFAULT_MAX_STDERR_BYTES);
         validate_user_env(&env).map_err(|error| {
             tracing::warn!(%request_id, %workspace_id, error = %error, "environment validation rejected request");
             invalid_with_request_id(&request_id, error)
@@ -125,28 +213,65 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
         })?;
 
         let _workspace_lock = self.workspace_locks.lock(&workspace_id).await;
-        let info = self
-            .store
-            .ensure_workspace(&workspace_id)
-            .map_err(|error| internal_with_request_id(&request_id, error))?;
-        let before_tree_hash = info.tree_hash.clone();
+        let info = {
+            let workspace_id = workspace_id.clone();
+            self.run_blocking(move |store| store.ensure_workspace_meta(&workspace_id))
+                .await
+                .map_err(|error| internal_with_request_id(&request_id, error))?
+        };
+        // Managed worktrees only change under this lock, so the previous
+        // after-hash is a valid before-hash and saves one full tree walk.
+        // Local-bound worktrees can be modified externally and are always
+        // re-hashed.
+        let before_tree_hash = if skip_tree_hash {
+            String::new()
+        } else {
+            let cached = match info.kind {
+                StoreWorkspaceKind::Managed => self.cached_tree_hash(&workspace_id),
+                StoreWorkspaceKind::LocalBound => None,
+            };
+            match cached {
+                Some(hash) => hash,
+                None => {
+                    let path = info.worktree_path.clone();
+                    self.run_blocking(move |_| hash_tree(&path))
+                        .await
+                        .map_err(|error| internal_with_request_id(&request_id, error))?
+                }
+            }
+        };
         let timeout = Duration::from_millis(timeout_ms);
         let output = self
             .runner
             .run(RunSpec {
                 command: command.clone(),
-                workspace_dir: info.worktree_path,
+                workspace_dir: info.worktree_path.clone(),
                 cwd: cwd.clone(),
                 env: HashMap::from_iter(env),
                 timeout,
                 filesystem_mode: filesystem_mode(policy_mode),
                 exposed_binaries: resolved_exposed_binaries,
+                max_stdout_bytes,
+                max_stderr_bytes,
             })
             .await
             .map_err(|error| {
                 tracing::warn!(%request_id, %workspace_id, command = %command, error = %error, "runner failed request");
                 internal_with_request_id(&request_id, error)
             })?;
+        let after_tree_hash = if skip_tree_hash {
+            String::new()
+        } else {
+            let path = info.worktree_path.clone();
+            let hash = self
+                .run_blocking(move |_| hash_tree(&path))
+                .await
+                .map_err(|error| internal_with_request_id(&request_id, error))?;
+            if info.kind == StoreWorkspaceKind::Managed {
+                self.store_tree_hash(&workspace_id, &hash);
+            }
+            hash
+        };
         let finished_at_unix_ms = unix_ms();
         let duration_ms = started.elapsed().as_millis() as u64;
         let audit = RunAudit {
@@ -162,29 +287,39 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
             stdout_bytes: output.stdout.len() as u64,
             stderr_bytes: output.stderr.len() as u64,
             policy_mode: policy_mode.into(),
+            timed_out: output.timed_out,
         };
-        let commit = self
-            .store
-            .commit_run(
-                &workspace_id,
-                &command,
-                &before_tree_hash,
-                output.exit_code,
-                RunAuditInput {
-                    request_id: request_id.clone(),
-                    cwd,
-                    exposed_binaries: requested_exposed_binaries,
-                    policy_mode: policy_mode_name(policy_mode).to_string(),
-                    timeout_ms,
-                    duration_ms,
-                    runner: output.runner.clone(),
-                    started_at_unix_ms,
-                    finished_at_unix_ms,
-                    stdout_bytes: output.stdout.len() as u64,
-                    stderr_bytes: output.stderr.len() as u64,
-                },
-            )
-            .map_err(|error| internal_with_request_id(&request_id, error))?;
+        let commit = {
+            let workspace_id = workspace_id.clone();
+            let command = command.clone();
+            let audit_input = RunAuditInput {
+                request_id: request_id.clone(),
+                cwd,
+                exposed_binaries: requested_exposed_binaries,
+                policy_mode: policy_mode_name(policy_mode).to_string(),
+                timeout_ms,
+                duration_ms,
+                runner: output.runner.clone(),
+                started_at_unix_ms,
+                finished_at_unix_ms,
+                stdout_bytes: output.stdout.len() as u64,
+                stderr_bytes: output.stderr.len() as u64,
+                timed_out: output.timed_out,
+            };
+            let exit_code = output.exit_code;
+            self.run_blocking(move |store| {
+                store.commit_run(
+                    &workspace_id,
+                    &command,
+                    &before_tree_hash,
+                    &after_tree_hash,
+                    exit_code,
+                    audit_input,
+                )
+            })
+            .await
+            .map_err(|error| internal_with_request_id(&request_id, error))?
+        };
         tracing::info!(
             %request_id,
             %workspace_id,
@@ -192,6 +327,7 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
             exit_code = output.exit_code,
             duration_ms,
             changed = commit.changed,
+            timed_out = output.timed_out,
             "completed sandbox command"
         );
 
@@ -205,6 +341,9 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
             after_tree_hash: commit.after_tree_hash,
             changed: commit.changed,
             audit: Some(audit),
+            stdout_truncated: output.stdout_truncated,
+            stderr_truncated: output.stderr_truncated,
+            timed_out: output.timed_out,
         }))
     }
 
@@ -214,7 +353,10 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
     ) -> Result<Response<StatusResponse>, Status> {
         let request = request.into_inner();
         let workspace_id = default_if_empty(request.workspace_id, "default");
-        let info = self.store.status(&workspace_id).map_err(internal)?;
+        let info = self
+            .run_blocking(move |store| store.status(&workspace_id))
+            .await
+            .map_err(internal)?;
         Ok(Response::new(StatusResponse {
             workspace: Some(workspace(info)),
             runner: self.runner.effective_name(),
@@ -228,8 +370,10 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
         let request = request.into_inner();
         let workspace_id = default_if_empty(request.workspace_id, "default");
         let page = self
-            .store
-            .list_operations(&workspace_id, request.page_size, &request.page_token)
+            .run_blocking(move |store| {
+                store.list_operations(&workspace_id, request.page_size, &request.page_token)
+            })
+            .await
             .map_err(internal)?;
         Ok(Response::new(ListOperationsResponse {
             operations: page.operations.into_iter().map(operation).collect(),
@@ -247,14 +391,34 @@ impl AgentSandboxServiceRpc for AgentSandboxService {
         if op_id.is_empty() {
             return Err(Status::invalid_argument("op_id cannot be empty"));
         }
-        let op = self
-            .store
-            .get_operation(&workspace_id, &op_id)
-            .map_err(internal)?
-            .ok_or_else(|| Status::not_found(format!("operation `{op_id}` not found")))?;
+        let op = {
+            let requested_op_id = op_id.clone();
+            self.run_blocking(move |store| store.get_operation(&workspace_id, &requested_op_id))
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| Status::not_found(format!("operation `{op_id}` not found")))?
+        };
         Ok(Response::new(GetOperationResponse {
             operation: Some(operation(op)),
         }))
+    }
+
+    async fn delete_workspace(
+        &self,
+        request: Request<DeleteWorkspaceRequest>,
+    ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
+        let request = request.into_inner();
+        let workspace_id = default_if_empty(request.workspace_id, "default");
+        let _workspace_lock = self.workspace_locks.lock(&workspace_id).await;
+        let deleted = {
+            let workspace_id = workspace_id.clone();
+            self.run_blocking(move |store| store.delete_workspace(&workspace_id))
+                .await
+                .map_err(internal)?
+        };
+        self.evict_tree_hash(&workspace_id);
+        tracing::info!(%workspace_id, deleted, "deleted workspace state");
+        Ok(Response::new(DeleteWorkspaceResponse { deleted }))
     }
 }
 
@@ -295,6 +459,7 @@ fn operation(info: crate::store::OperationInfo) -> Operation {
             stdout_bytes: info.stdout_bytes,
             stderr_bytes: info.stderr_bytes,
             policy_mode: proto_policy_mode(&info.policy_mode).into(),
+            timed_out: info.timed_out,
         }),
     }
 }
@@ -395,11 +560,11 @@ fn internal_with_request_id(request_id: &str, error: anyhow::Error) -> Status {
     internal(anyhow::anyhow!("request_id={request_id}: {error}"))
 }
 
-fn unix_ms() -> i64 {
+fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis() as u64
 }
 
 fn short_id() -> String {

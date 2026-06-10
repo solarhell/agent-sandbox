@@ -6,12 +6,13 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     proto::v1::{
-        BindWorkspaceRequest, CreateWorkspaceRequest, GetOperationRequest, ListOperationsRequest,
-        LocalWorkspaceBinding, Operation, PolicyMode, RunRequest, StatusRequest, WorkspaceBinding,
-        agent_sandbox_service_client::AgentSandboxServiceClient, workspace_binding,
+        BindWorkspaceRequest, CreateWorkspaceRequest, DeleteWorkspaceRequest, GetOperationRequest,
+        ListOperationsRequest, LocalWorkspaceBinding, Operation, PolicyMode, RunRequest,
+        StatusRequest, WorkspaceBinding, agent_sandbox_service_client::AgentSandboxServiceClient,
+        workspace_binding,
     },
     runner::SandboxRunner,
-    service::AgentSandboxService,
+    service::{AgentSandboxService, ServiceOptions},
 };
 
 #[derive(Debug, Parser)]
@@ -31,6 +32,12 @@ enum Command {
         state_dir: PathBuf,
         #[arg(long = "allow-bind-root")]
         allow_bind_roots: Vec<PathBuf>,
+        /// Server-side ceiling for RunRequest.timeout_ms.
+        #[arg(long, default_value_t = 1_800_000)]
+        max_run_timeout_ms: u64,
+        /// Operation log entries kept per workspace; 0 keeps everything.
+        #[arg(long, default_value_t = 1_000)]
+        max_ops_per_workspace: usize,
     },
     CreateWorkspace {
         #[arg(long, default_value = "http://127.0.0.1:50051")]
@@ -62,6 +69,14 @@ enum Command {
         timeout_ms: u64,
         #[arg(long, value_enum, default_value_t = PolicyModeArg::ReadWrite)]
         policy_mode: PolicyModeArg,
+        /// Per-stream output caps in bytes; 0 uses the daemon default.
+        #[arg(long, default_value_t = 0)]
+        max_stdout_bytes: u64,
+        #[arg(long, default_value_t = 0)]
+        max_stderr_bytes: u64,
+        /// Skip before/after tree hashing for this run.
+        #[arg(long, default_value_t = false)]
+        skip_tree_hash: bool,
     },
     Status {
         #[arg(long, default_value = "http://127.0.0.1:50051")]
@@ -75,12 +90,18 @@ enum Command {
         #[arg(long, default_value = "default")]
         workspace: String,
         #[arg(long, default_value_t = 50)]
-        page_size: u32,
+        page_size: u64,
         #[arg(long, default_value = "")]
         page_token: String,
     },
     GetOperation {
         op_id: String,
+        #[arg(long, default_value = "http://127.0.0.1:50051")]
+        endpoint: String,
+        #[arg(long, default_value = "default")]
+        workspace: String,
+    },
+    DeleteWorkspace {
         #[arg(long, default_value = "http://127.0.0.1:50051")]
         endpoint: String,
         #[arg(long, default_value = "default")]
@@ -102,7 +123,20 @@ pub async fn run() -> anyhow::Result<()> {
             addr,
             state_dir,
             allow_bind_roots,
-        } => serve(addr, state_dir, allow_bind_roots).await,
+            max_run_timeout_ms,
+            max_ops_per_workspace,
+        } => {
+            serve(
+                addr,
+                state_dir,
+                allow_bind_roots,
+                ServiceOptions {
+                    max_run_timeout_ms,
+                    max_ops_per_workspace,
+                },
+            )
+            .await
+        }
         Command::CreateWorkspace {
             endpoint,
             workspace,
@@ -169,6 +203,9 @@ pub async fn run() -> anyhow::Result<()> {
             exposed_binaries,
             timeout_ms,
             policy_mode,
+            max_stdout_bytes,
+            max_stderr_bytes,
+            skip_tree_hash,
         } => {
             let mut client = client(endpoint).await?;
             let response = client
@@ -180,6 +217,9 @@ pub async fn run() -> anyhow::Result<()> {
                     exposed_binaries,
                     timeout_ms,
                     policy_mode: PolicyMode::from(policy_mode).into(),
+                    max_stdout_bytes,
+                    max_stderr_bytes,
+                    skip_tree_hash,
                 })
                 .await?
                 .into_inner();
@@ -187,7 +227,7 @@ pub async fn run() -> anyhow::Result<()> {
             eprint!("{}", String::from_utf8_lossy(&response.stderr));
             if let Some(audit) = response.audit {
                 eprintln!(
-                    "\n[agent-sandbox] request={} exit={} runner={} policy={} duration_ms={} cwd={} op={} before={} after={} changed={}",
+                    "\n[agent-sandbox] request={} exit={} runner={} policy={} duration_ms={} cwd={} op={} before={} after={} changed={} timed_out={} stdout_truncated={} stderr_truncated={}",
                     audit.request_id,
                     response.exit_code,
                     response.runner,
@@ -197,17 +237,21 @@ pub async fn run() -> anyhow::Result<()> {
                     response.op_id,
                     response.before_tree_hash,
                     response.after_tree_hash,
-                    response.changed
+                    response.changed,
+                    response.timed_out,
+                    response.stdout_truncated,
+                    response.stderr_truncated
                 );
             } else {
                 eprintln!(
-                    "\n[agent-sandbox] exit={} runner={} op={} before={} after={} changed={}",
+                    "\n[agent-sandbox] exit={} runner={} op={} before={} after={} changed={} timed_out={}",
                     response.exit_code,
                     response.runner,
                     response.op_id,
                     response.before_tree_hash,
                     response.after_tree_hash,
-                    response.changed
+                    response.changed,
+                    response.timed_out
                 );
             }
             Ok(())
@@ -284,6 +328,26 @@ pub async fn run() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::DeleteWorkspace {
+            endpoint,
+            workspace,
+        } => {
+            let mut client = client(endpoint).await?;
+            let response = client
+                .delete_workspace(DeleteWorkspaceRequest {
+                    workspace_id: workspace.clone(),
+                })
+                .await?
+                .into_inner();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "workspace_id": workspace,
+                    "deleted": response.deleted,
+                }))?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -291,9 +355,10 @@ async fn serve(
     addr: SocketAddr,
     state_dir: PathBuf,
     allow_bind_roots: Vec<PathBuf>,
+    options: ServiceOptions,
 ) -> anyhow::Result<()> {
     SandboxRunner::preflight()?;
-    let service = AgentSandboxService::new(state_dir, allow_bind_roots)?;
+    let service = AgentSandboxService::new(state_dir, allow_bind_roots, options)?;
     tracing::info!(%addr, "starting agent sandbox daemon");
     Server::builder()
         .add_service(service.into_server())
@@ -334,6 +399,7 @@ fn operation_json(operation: Operation) -> serde_json::Value {
             "finished_at_unix_ms": audit.finished_at_unix_ms,
             "stdout_bytes": audit.stdout_bytes,
             "stderr_bytes": audit.stderr_bytes,
+            "timed_out": audit.timed_out,
         })
     });
     serde_json::json!({

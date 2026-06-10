@@ -11,6 +11,7 @@ service AgentSandboxService {
   rpc Status(StatusRequest) returns (StatusResponse);
   rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
   rpc GetOperation(GetOperationRequest) returns (GetOperationResponse);
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteWorkspaceResponse);
 }
 
 message CreateWorkspaceRequest {
@@ -62,6 +63,15 @@ message RunRequest {
   repeated string exposed_binaries = 5;
   uint64 timeout_ms = 6;
   PolicyMode policy_mode = 7;
+  // Per-stream output caps in bytes. 0 means the daemon default.
+  // The daemon truncates output server-side and sets the truncated flags,
+  // so responses never exceed gRPC message limits.
+  uint64 max_stdout_bytes = 8;
+  uint64 max_stderr_bytes = 9;
+  // Skip before/after tree hashing for this run. The operation log entry is
+  // still written, with empty tree hashes and changed=false. Use this when
+  // the caller does not consume tree hashes and the workspace is large.
+  bool skip_tree_hash = 10;
 }
 
 enum PolicyMode {
@@ -71,7 +81,7 @@ enum PolicyMode {
 }
 
 message RunResponse {
-  int32 exit_code = 1;
+  uint64 exit_code = 1;
   bytes stdout = 2;
   bytes stderr = 3;
   string runner = 4;
@@ -80,6 +90,12 @@ message RunResponse {
   string after_tree_hash = 7;
   bool changed = 8;
   RunAudit audit = 9;
+  // Output was truncated server-side to the requested/default cap.
+  bool stdout_truncated = 10;
+  bool stderr_truncated = 11;
+  // The command hit its timeout and was killed. stdout/stderr hold the
+  // output produced before the kill; exit_code is 124.
+  bool timed_out = 12;
 }
 
 message RunAudit {
@@ -90,11 +106,12 @@ message RunAudit {
   uint64 timeout_ms = 5;
   uint64 duration_ms = 6;
   string runner = 7;
-  int64 started_at_unix_ms = 8;
-  int64 finished_at_unix_ms = 9;
+  uint64 started_at_unix_ms = 8;
+  uint64 finished_at_unix_ms = 9;
   uint64 stdout_bytes = 10;
   uint64 stderr_bytes = 11;
   PolicyMode policy_mode = 12;
+  bool timed_out = 13;
 }
 
 message StatusRequest {
@@ -109,7 +126,7 @@ message StatusResponse {
 message Operation {
   string op_id = 1;
   string command = 2;
-  int32 exit_code = 3;
+  uint64 exit_code = 3;
   string before_tree_hash = 4;
   string after_tree_hash = 5;
   bool changed = 6;
@@ -118,7 +135,7 @@ message Operation {
 
 message ListOperationsRequest {
   string workspace_id = 1;
-  uint32 page_size = 2;
+  uint64 page_size = 2;
   string page_token = 3;
 }
 
@@ -134,4 +151,13 @@ message GetOperationRequest {
 
 message GetOperationResponse {
   Operation operation = 1;
+}
+
+message DeleteWorkspaceRequest {
+  string workspace_id = 1;
+}
+
+message DeleteWorkspaceResponse {
+  // False when the workspace did not exist; the call still succeeds.
+  bool deleted = 1;
 }

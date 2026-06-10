@@ -16,6 +16,7 @@ use walkdir::WalkDir;
 pub struct WorkspaceStore {
     state_dir: PathBuf,
     allowed_bind_roots: Vec<PathBuf>,
+    max_ops_per_workspace: usize,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -38,8 +39,8 @@ struct WorkspaceMetadata {
     workspace_id: String,
     kind: WorkspaceKind,
     worktree_path: PathBuf,
-    created_at_unix_ms: i64,
-    updated_at_unix_ms: i64,
+    created_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,14 +55,16 @@ pub struct OperationInfo {
     pub timeout_ms: u64,
     pub duration_ms: u64,
     pub runner: String,
-    pub started_at_unix_ms: i64,
-    pub finished_at_unix_ms: i64,
+    pub started_at_unix_ms: u64,
+    pub finished_at_unix_ms: u64,
     pub stdout_bytes: u64,
     pub stderr_bytes: u64,
+    #[serde(default)]
+    pub timed_out: bool,
     pub before_tree_hash: String,
     pub after_tree_hash: String,
     pub changed: bool,
-    pub exit_code: i32,
+    pub exit_code: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -81,10 +84,11 @@ pub struct RunAuditInput {
     pub timeout_ms: u64,
     pub duration_ms: u64,
     pub runner: String,
-    pub started_at_unix_ms: i64,
-    pub finished_at_unix_ms: i64,
+    pub started_at_unix_ms: u64,
+    pub finished_at_unix_ms: u64,
     pub stdout_bytes: u64,
     pub stderr_bytes: u64,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,12 +103,14 @@ impl WorkspaceStore {
         Self {
             state_dir: absolute_path(state_dir),
             allowed_bind_roots: Vec::new(),
+            max_ops_per_workspace: 0,
         }
     }
 
     pub fn with_allowed_bind_roots<I, P>(
         state_dir: PathBuf,
         allowed_bind_roots: I,
+        max_ops_per_workspace: usize,
     ) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = P>,
@@ -117,6 +123,7 @@ impl WorkspaceStore {
         Ok(Self {
             state_dir: absolute_path(state_dir),
             allowed_bind_roots: roots,
+            max_ops_per_workspace,
         })
     }
 
@@ -166,27 +173,47 @@ impl WorkspaceStore {
         self.status(workspace_id)
     }
 
-    pub fn ensure_workspace(&self, workspace_id: &str) -> anyhow::Result<WorkspaceInfo> {
+    /// Loads (creating if missing) workspace metadata without hashing the
+    /// worktree. `tree_hash` is left empty; use [`hash_tree`] when the caller
+    /// actually needs it.
+    pub fn ensure_workspace_meta(&self, workspace_id: &str) -> anyhow::Result<WorkspaceInfo> {
         validate_workspace_id(workspace_id)?;
         if !self.metadata_file(workspace_id).exists() {
-            return self.create_workspace(Some(workspace_id.to_string()));
-        }
-        self.status(workspace_id)
-    }
-
-    pub fn status(&self, workspace_id: &str) -> anyhow::Result<WorkspaceInfo> {
-        validate_workspace_id(workspace_id)?;
-        if !self.metadata_file(workspace_id).exists() {
-            return self.create_workspace(Some(workspace_id.to_string()));
+            let info = self.create_workspace(Some(workspace_id.to_string()))?;
+            return Ok(WorkspaceInfo {
+                tree_hash: String::new(),
+                ..info
+            });
         }
         let metadata = self.read_metadata(workspace_id)?;
         fs::create_dir_all(&metadata.worktree_path)?;
         Ok(WorkspaceInfo {
             workspace_id: metadata.workspace_id,
             kind: metadata.kind,
-            tree_hash: hash_tree(&metadata.worktree_path)?,
+            tree_hash: String::new(),
             worktree_path: metadata.worktree_path,
         })
+    }
+
+    pub fn status(&self, workspace_id: &str) -> anyhow::Result<WorkspaceInfo> {
+        let info = self.ensure_workspace_meta(workspace_id)?;
+        Ok(WorkspaceInfo {
+            tree_hash: hash_tree(&info.worktree_path)?,
+            ..info
+        })
+    }
+
+    pub fn delete_workspace(&self, workspace_id: &str) -> anyhow::Result<bool> {
+        validate_workspace_id(workspace_id)?;
+        let workspace_dir = self.workspace_dir(workspace_id);
+        if !workspace_dir.exists() {
+            return Ok(false);
+        }
+        // Local-bound worktrees live outside the state directory and are left
+        // untouched; managed worktrees live inside and are removed with it.
+        fs::remove_dir_all(&workspace_dir)
+            .with_context(|| format!("failed to remove {}", workspace_dir.display()))?;
+        Ok(true)
     }
 
     pub fn commit_run(
@@ -194,12 +221,11 @@ impl WorkspaceStore {
         workspace_id: &str,
         command: &str,
         before_tree_hash: &str,
-        exit_code: i32,
+        after_tree_hash: &str,
+        exit_code: u64,
         audit: RunAuditInput,
     ) -> anyhow::Result<RunCommit> {
         validate_workspace_id(workspace_id)?;
-        let info = self.status(workspace_id)?;
-        let after_tree_hash = hash_tree(&info.worktree_path)?;
         let changed = before_tree_hash != after_tree_hash;
         let op_id = format!("op_{}", short_id());
         self.write_operation(
@@ -219,24 +245,61 @@ impl WorkspaceStore {
                 finished_at_unix_ms: audit.finished_at_unix_ms,
                 stdout_bytes: audit.stdout_bytes,
                 stderr_bytes: audit.stderr_bytes,
+                timed_out: audit.timed_out,
                 before_tree_hash: before_tree_hash.to_string(),
-                after_tree_hash: after_tree_hash.clone(),
+                after_tree_hash: after_tree_hash.to_string(),
                 changed,
                 exit_code,
             },
         )?;
+        self.prune_operations(workspace_id)?;
         Ok(RunCommit {
             op_id,
             before_tree_hash: before_tree_hash.to_string(),
-            after_tree_hash,
+            after_tree_hash: after_tree_hash.to_string(),
             changed,
         })
+    }
+
+    /// Removes the oldest operation log entries beyond `max_ops_per_workspace`.
+    /// Ordering uses file modification time so pruning never has to parse the
+    /// log entries themselves.
+    fn prune_operations(&self, workspace_id: &str) -> anyhow::Result<()> {
+        if self.max_ops_per_workspace == 0 {
+            return Ok(());
+        }
+        let ops_dir = self.workspace_dir(workspace_id).join("ops");
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&ops_dir)
+            .with_context(|| format!("failed to read {}", ops_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            let modified = entry.metadata()?.modified()?;
+            entries.push((modified, path));
+        }
+        if entries.len() <= self.max_ops_per_workspace {
+            return Ok(());
+        }
+        entries.sort_by_key(|(modified, _)| *modified);
+        let excess = entries.len() - self.max_ops_per_workspace;
+        for (_, path) in entries.into_iter().take(excess) {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to prune {}", path.display()))?;
+        }
+        Ok(())
     }
 
     pub fn list_operations(
         &self,
         workspace_id: &str,
-        page_size: u32,
+        page_size: u64,
         page_token: &str,
     ) -> anyhow::Result<ListOperationsResult> {
         validate_workspace_id(workspace_id)?;
@@ -435,7 +498,7 @@ fn sync_dir(path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to sync {}", path.display()))
 }
 
-fn normalized_page_size(page_size: u32) -> usize {
+fn normalized_page_size(page_size: u64) -> usize {
     match page_size {
         0 => 50,
         1..=200 => page_size as usize,
@@ -518,7 +581,7 @@ fn absolute_path(path: PathBuf) -> PathBuf {
     }
 }
 
-fn hash_tree(root: &Path) -> anyhow::Result<String> {
+pub fn hash_tree(root: &Path) -> anyhow::Result<String> {
     let mut entries = BTreeMap::new();
     if !root.exists() {
         return Ok(hex::encode(Sha256::digest([])));
@@ -564,11 +627,11 @@ fn hash_tree(root: &Path) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn unix_ms() -> i64 {
+fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis() as u64
 }
 
 fn short_id() -> String {
@@ -578,6 +641,23 @@ fn short_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_audit(request_id: &str, started_at_unix_ms: u64) -> RunAuditInput {
+        RunAuditInput {
+            request_id: request_id.to_string(),
+            cwd: "/".to_string(),
+            exposed_binaries: vec!["printf".to_string()],
+            policy_mode: "read_write".to_string(),
+            timeout_ms: 30_000,
+            duration_ms: 1,
+            runner: "bubblewrap".to_string(),
+            started_at_unix_ms,
+            finished_at_unix_ms: started_at_unix_ms + 1,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            timed_out: false,
+        }
+    }
 
     #[test]
     fn creates_managed_workspace_with_metadata() {
@@ -599,7 +679,7 @@ mod tests {
         let external = bind_root.join("conversation/head");
         fs::create_dir_all(&bind_root).unwrap();
         let store =
-            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()])
+            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()], 0)
                 .unwrap();
 
         let ws = store
@@ -620,7 +700,7 @@ mod tests {
         fs::create_dir_all(&bind_root).unwrap();
         fs::create_dir_all(&outside).unwrap();
         let store =
-            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()])
+            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()], 0)
                 .unwrap();
         let err = store
             .bind_local_workspace("conv", &outside, false)
@@ -642,7 +722,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, bind_root.join("escape")).unwrap();
         let store =
-            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()])
+            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()], 0)
                 .unwrap();
         let err = store
             .bind_local_workspace("conv", &bind_root.join("escape"), false)
@@ -660,25 +740,15 @@ mod tests {
             .create_workspace(Some("ws".to_string()))
             .expect("create workspace");
         fs::write(ws.worktree_path.join("a.md"), "hello").unwrap();
+        let after_tree_hash = hash_tree(&ws.worktree_path).unwrap();
         let commit = store
             .commit_run(
                 "ws",
                 "printf hello > a.md",
                 &ws.tree_hash,
+                &after_tree_hash,
                 0,
-                RunAuditInput {
-                    request_id: "req_test".to_string(),
-                    cwd: "/".to_string(),
-                    exposed_binaries: vec!["printf".to_string()],
-                    policy_mode: "read_write".to_string(),
-                    timeout_ms: 30_000,
-                    duration_ms: 3,
-                    runner: "bubblewrap".to_string(),
-                    started_at_unix_ms: 1,
-                    finished_at_unix_ms: 4,
-                    stdout_bytes: 0,
-                    stderr_bytes: 0,
-                },
+                test_audit("req_test", 1),
             )
             .unwrap();
         assert!(commit.changed);
@@ -704,20 +774,9 @@ mod tests {
                 "ws",
                 "printf first",
                 &ws.tree_hash,
+                &ws.tree_hash,
                 0,
-                RunAuditInput {
-                    request_id: "req_first".to_string(),
-                    cwd: "/".to_string(),
-                    exposed_binaries: vec!["printf".to_string()],
-                    policy_mode: "read_write".to_string(),
-                    timeout_ms: 30_000,
-                    duration_ms: 1,
-                    runner: "bubblewrap".to_string(),
-                    started_at_unix_ms: 10,
-                    finished_at_unix_ms: 11,
-                    stdout_bytes: 5,
-                    stderr_bytes: 0,
-                },
+                test_audit("req_first", 10),
             )
             .unwrap();
         let second = store
@@ -725,20 +784,9 @@ mod tests {
                 "ws",
                 "printf second",
                 &ws.tree_hash,
+                &ws.tree_hash,
                 0,
-                RunAuditInput {
-                    request_id: "req_second".to_string(),
-                    cwd: "/".to_string(),
-                    exposed_binaries: vec!["printf".to_string()],
-                    policy_mode: "read_write".to_string(),
-                    timeout_ms: 30_000,
-                    duration_ms: 1,
-                    runner: "bubblewrap".to_string(),
-                    started_at_unix_ms: 20,
-                    finished_at_unix_ms: 21,
-                    stdout_bytes: 6,
-                    stderr_bytes: 0,
-                },
+                test_audit("req_second", 20),
             )
             .unwrap();
 
@@ -777,20 +825,9 @@ mod tests {
                 "ws",
                 "printf ok",
                 &ws.tree_hash,
+                &ws.tree_hash,
                 0,
-                RunAuditInput {
-                    request_id: "req_ok".to_string(),
-                    cwd: "/".to_string(),
-                    exposed_binaries: vec!["printf".to_string()],
-                    policy_mode: "read_write".to_string(),
-                    timeout_ms: 30_000,
-                    duration_ms: 1,
-                    runner: "bubblewrap".to_string(),
-                    started_at_unix_ms: 1,
-                    finished_at_unix_ms: 2,
-                    stdout_bytes: 2,
-                    stderr_bytes: 0,
-                },
+                test_audit("req_ok", 1),
             )
             .unwrap();
         fs::write(
@@ -809,5 +846,57 @@ mod tests {
         let store = WorkspaceStore::new(std::env::temp_dir());
         assert!(store.status("../escape").is_err());
         assert!(store.get_operation("ws", "../escape").is_err());
+    }
+
+    #[test]
+    fn prunes_oldest_operations_beyond_limit() {
+        let root = std::env::temp_dir().join(format!("agent-sandbox-test-{}", short_id()));
+        let mut store = WorkspaceStore::new(root.clone());
+        store.max_ops_per_workspace = 2;
+        let ws = store
+            .create_workspace(Some("ws".to_string()))
+            .expect("create workspace");
+        let mut op_ids = Vec::new();
+        for index in 0..4 {
+            let commit = store
+                .commit_run(
+                    "ws",
+                    "printf ok",
+                    &ws.tree_hash,
+                    &ws.tree_hash,
+                    0,
+                    test_audit(&format!("req_{index}"), index),
+                )
+                .unwrap();
+            op_ids.push(commit.op_id);
+            // mtime ordering needs distinct timestamps
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let page = store.list_operations("ws", 50, "").unwrap();
+        assert_eq!(page.operations.len(), 2);
+        assert!(store.get_operation("ws", &op_ids[0]).unwrap().is_none());
+        assert!(store.get_operation("ws", &op_ids[1]).unwrap().is_none());
+        assert!(store.get_operation("ws", &op_ids[3]).unwrap().is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_workspace_removes_state_but_not_bound_worktree() {
+        let root = std::env::temp_dir().join(format!("agent-sandbox-test-{}", short_id()));
+        let bind_root = root.join("bind-root");
+        let external = bind_root.join("conversation/head");
+        fs::create_dir_all(&external).unwrap();
+        let store =
+            WorkspaceStore::with_allowed_bind_roots(root.join("state"), [bind_root.clone()], 0)
+                .unwrap();
+        store
+            .bind_local_workspace("conv", &external, false)
+            .expect("bind workspace");
+
+        assert!(store.delete_workspace("conv").unwrap());
+        assert!(!root.join("state/workspaces/conv").exists());
+        assert!(external.exists());
+        assert!(!store.delete_workspace("conv").unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 }

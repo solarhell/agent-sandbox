@@ -67,6 +67,10 @@ Production helpers:
 - `RunBashReadWrite(ctx, command, ...)` sets `PolicyModeReadWrite`; callers still choose which tools to expose with `ExposedBinaries(...)`.
 - `ExposedBinaries(...)` exposes external binaries inside the sandbox command `PATH`; bash builtins such as `echo`, `cd`, and `test` must also be listed explicitly.
 - The daemon validates exposed external binaries against the daemon host PATH. Known bash builtins are enabled inside bash without exposing same-name host binaries.
+- `MaxStdoutBytes(...)` / `MaxStderrBytes(...)` cap output server-side; `RunResult.StdoutTruncated` / `StderrTruncated` report when a cap was hit. Responses never exceed the gRPC message limit.
+- A timed-out command returns a normal result with `RunResult.TimedOut = true`, `ExitCode = 124`, and the partial output produced before the kill — not a gRPC error.
+- `SkipTreeHash(true)` skips before/after worktree hashing when tree hashes are not consumed; for large workspaces this removes the dominant per-run cost.
+- `DeleteWorkspace(ctx, ...)` removes daemon-side workspace state (a bound local worktree is left untouched).
 
 The SDK is configured in code. There is no config file path in this package.
 

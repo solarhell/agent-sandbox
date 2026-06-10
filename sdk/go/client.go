@@ -250,11 +250,32 @@ func (c *Client) Run(ctx context.Context, command string, options ...RunOption) 
 		ExposedBinaries: req.exposed,
 		TimeoutMs:       uint64(req.timeout.Milliseconds()),
 		PolicyMode:      policyModeToProto(req.policy),
+		MaxStdoutBytes:  req.maxStdoutBytes,
+		MaxStderrBytes:  req.maxStderrBytes,
+		SkipTreeHash:    req.skipTreeHash,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return runResultFromProto(response), nil
+}
+
+// DeleteWorkspace removes the daemon-side workspace state. For local-bound
+// workspaces the bound worktree itself is left untouched. Returns false when
+// the workspace did not exist.
+func (c *Client) DeleteWorkspace(ctx context.Context, options ...WorkspaceOption) (bool, error) {
+	workspaceID := c.workspace
+	for _, option := range options {
+		option(&workspaceID)
+	}
+
+	response, err := c.rpc.DeleteWorkspace(ctx, &agentsandboxv1.DeleteWorkspaceRequest{
+		WorkspaceId: workspaceID,
+	})
+	if err != nil {
+		return false, err
+	}
+	return response.GetDeleted(), nil
 }
 
 type WorkspaceOption func(*string)
@@ -272,18 +293,21 @@ type ListOperationsOption func(*listOperationsConfig)
 type BindWorkspaceOption func(*bindWorkspaceConfig)
 
 type runConfig struct {
-	workspace  string
-	cwd        string
-	env        map[string]string
-	exposed    []string
-	exposedSet bool
-	policy     PolicyMode
-	timeout    time.Duration
+	workspace      string
+	cwd            string
+	env            map[string]string
+	exposed        []string
+	exposedSet     bool
+	policy         PolicyMode
+	timeout        time.Duration
+	maxStdoutBytes uint64
+	maxStderrBytes uint64
+	skipTreeHash   bool
 }
 
 type listOperationsConfig struct {
 	workspace string
-	pageSize  uint32
+	pageSize  uint64
 	pageToken string
 }
 
@@ -338,13 +362,36 @@ func Timeout(timeout time.Duration) RunOption {
 	}
 }
 
+// MaxStdoutBytes caps stdout server-side; 0 uses the daemon default. The
+// daemon sets RunResult.StdoutTruncated when the cap is hit.
+func MaxStdoutBytes(limit uint64) RunOption {
+	return func(cfg *runConfig) {
+		cfg.maxStdoutBytes = limit
+	}
+}
+
+// MaxStderrBytes caps stderr server-side; 0 uses the daemon default.
+func MaxStderrBytes(limit uint64) RunOption {
+	return func(cfg *runConfig) {
+		cfg.maxStderrBytes = limit
+	}
+}
+
+// SkipTreeHash disables before/after worktree hashing for this run. Use it
+// when tree hashes are not consumed and the workspace is large.
+func SkipTreeHash(skip bool) RunOption {
+	return func(cfg *runConfig) {
+		cfg.skipTreeHash = skip
+	}
+}
+
 func ListOperationsWorkspace(workspace string) ListOperationsOption {
 	return func(cfg *listOperationsConfig) {
 		cfg.workspace = workspace
 	}
 }
 
-func PageSize(pageSize uint32) ListOperationsOption {
+func PageSize(pageSize uint64) ListOperationsOption {
 	return func(cfg *listOperationsConfig) {
 		cfg.pageSize = pageSize
 	}

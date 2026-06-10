@@ -57,26 +57,7 @@ mod imp {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
-    fn network_syscalls() -> &'static [u32] {
-        &[
-            libc::SYS_socket as u32,
-            libc::SYS_socketpair as u32,
-            libc::SYS_connect as u32,
-            libc::SYS_accept as u32,
-            libc::SYS_accept4 as u32,
-            libc::SYS_bind as u32,
-            libc::SYS_listen as u32,
-            libc::SYS_sendto as u32,
-            libc::SYS_sendmsg as u32,
-            libc::SYS_sendmmsg as u32,
-            libc::SYS_recvfrom as u32,
-            libc::SYS_recvmsg as u32,
-            libc::SYS_recvmmsg as u32,
-        ]
-    }
-
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn network_syscalls() -> &'static [u32] {
         &[
             libc::SYS_socket as u32,

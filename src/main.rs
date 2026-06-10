@@ -1,4 +1,3 @@
-mod backend;
 mod cli;
 mod landlock_exec;
 mod proto;

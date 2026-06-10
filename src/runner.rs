@@ -25,6 +25,8 @@ pub struct RunSpec {
     pub timeout: Duration,
     pub filesystem_mode: FilesystemMode,
     pub exposed_binaries: Vec<ExposedBinary>,
+    pub max_stdout_bytes: usize,
+    pub max_stderr_bytes: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -33,12 +35,19 @@ pub struct ExposedBinary {
     pub host_path: Option<PathBuf>,
 }
 
+/// Exit code reported when a command is killed because it hit its timeout,
+/// matching the convention used by coreutils `timeout`.
+pub const TIMEOUT_EXIT_CODE: u64 = 124;
+
 #[derive(Debug, Clone)]
 pub struct RunOutput {
-    pub exit_code: i32,
+    pub exit_code: u64,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub runner: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +178,14 @@ impl SandboxRunner {
             .arg(command_script(&spec.command, &spec.exposed_binaries))
             .kill_on_drop(true);
 
-        run_child(command, spec.timeout, "bubblewrap").await
+        run_child(
+            command,
+            spec.timeout,
+            "bubblewrap",
+            spec.max_stdout_bytes,
+            spec.max_stderr_bytes,
+        )
+        .await
     }
 }
 
@@ -205,22 +221,105 @@ async fn run_child(
     mut command: Command,
     timeout: Duration,
     runner: &str,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
 ) -> anyhow::Result<RunOutput> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command.spawn().context("failed to spawn sandbox command")?;
-    let output = match time::timeout(timeout, child.wait_with_output()).await {
-        Ok(output) => output?,
-        Err(_) => bail!("command timed out after {} ms", timeout.as_millis()),
+    let mut child = command.spawn().context("failed to spawn sandbox command")?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("sandbox command stdout pipe missing"))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("sandbox command stderr pipe missing"))?;
+    let stdout_task = tokio::spawn(read_capped(stdout_pipe, max_stdout_bytes));
+    let stderr_task = tokio::spawn(read_capped(stderr_pipe, max_stderr_bytes));
+
+    let (status, timed_out) = match time::timeout(timeout, child.wait()).await {
+        Ok(status) => (
+            Some(status.context("failed to wait for sandbox command")?),
+            false,
+        ),
+        Err(_) => {
+            // Kill bubblewrap; --die-with-parent propagates the kill to the
+            // sandboxed process tree, which closes the pipes and unblocks the
+            // reader tasks. The partial output read so far is returned.
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            (None, true)
+        }
+    };
+
+    let (stdout, stdout_truncated) = stdout_task
+        .await
+        .context("stdout reader task failed")?
+        .context("failed to read sandbox stdout")?;
+    let (stderr, stderr_truncated) = stderr_task
+        .await
+        .context("stderr reader task failed")?
+        .context("failed to read sandbox stderr")?;
+
+    let exit_code = match status {
+        Some(status) => exit_code_from_status(status),
+        None => TIMEOUT_EXIT_CODE,
     };
     Ok(RunOutput {
-        exit_code: output.status.code().unwrap_or(128),
-        stdout: output.stdout,
-        stderr: output.stderr,
+        exit_code,
+        stdout,
+        stderr,
         runner: runner.to_string(),
+        stdout_truncated,
+        stderr_truncated,
+        timed_out,
     })
+}
+
+/// Reads a pipe to EOF, keeping at most `cap` bytes. Draining continues past
+/// the cap so the child never blocks on a full pipe.
+async fn read_capped<R>(mut reader: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut data = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        if data.len() < cap {
+            let take = (cap - data.len()).min(read);
+            data.extend_from_slice(&buffer[..take]);
+            if take < read {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    Ok((data, truncated))
+}
+
+fn exit_code_from_status(status: std::process::ExitStatus) -> u64 {
+    if let Some(code) = status.code() {
+        return code.max(0) as u64;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return (128 + signal.max(0)) as u64;
+        }
+    }
+    128
 }
 
 fn sandbox_cwd(cwd: &str) -> anyhow::Result<String> {

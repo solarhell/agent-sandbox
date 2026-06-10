@@ -11,7 +11,7 @@ The first implementation follows the lighter Claude Code / Codex-style model:
 - After the command exits, the daemon records an operation log entry with `op_id`, exit code, and before/after tree hashes.
 - Rollback and fork are intentionally not supported in this first cut.
 
-The current runnable backend is local state on disk. Aliyun OSS and AWS S3 are intentionally kept as adapter slots only: their config shapes and factory path exist, but the adapters return a clear "not implemented yet" error until we choose the SDK/API strategy.
+All state lives on local disk under the daemon state directory.
 
 ## Run
 
@@ -58,7 +58,7 @@ Command execution and operation logs still use `workspace_id`; operation logs st
 Each successful run is also written to the workspace operation log with audit fields:
 
 ```text
-request_id workspace_id command cwd exposed_binaries timeout_ms duration_ms runner exit_code stdout_bytes stderr_bytes started_at_unix_ms finished_at_unix_ms
+request_id workspace_id command cwd exposed_binaries timeout_ms duration_ms runner exit_code stdout_bytes stderr_bytes timed_out started_at_unix_ms finished_at_unix_ms
 ```
 
 Policy rejects and runner failures include the same `request_id` in daemon logs and gRPC error messages.
@@ -71,6 +71,20 @@ cargo run -- get-operation --workspace demo op_abc123...
 ```
 
 `ListOperations` returns the newest operations first. `page_token` is an opaque offset token for the next page; `page_size` defaults to 50 and is capped at 200.
+
+Operation logs are pruned per workspace: `serve --max-ops-per-workspace` (default 1000) keeps only the newest entries; `0` keeps everything. `DeleteWorkspace` removes all daemon-side workspace state (operation logs, metadata, and managed worktrees); a bound local worktree is left untouched:
+
+```bash
+cargo run -- delete-workspace --workspace demo
+```
+
+## Run Semantics
+
+- stdout/stderr are truncated server-side. `RunRequest.max_stdout_bytes` / `max_stderr_bytes` control the caps (0 means the daemon defaults of 1 MiB / 256 KiB; hard ceiling 1.5 MiB each), and `RunResponse.stdout_truncated` / `stderr_truncated` report when a cap was hit. Responses therefore never exceed the default 4 MiB gRPC message limit.
+- A command that hits its timeout is killed and still returns a normal response: `timed_out = true`, `exit_code = 124`, with the output produced before the kill. Timeouts are not gRPC errors.
+- Commands killed by a signal report `exit_code = 128 + signal`.
+- `RunRequest.timeout_ms` is clamped to `serve --max-run-timeout-ms` (default 30 minutes).
+- Each run records before/after workspace tree hashes in the operation log. Set `RunRequest.skip_tree_hash = true` to skip hashing when the caller does not consume tree hashes — for large workspaces this removes the dominant per-run cost. For managed workspaces the daemon reuses the previous after-hash as the next before-hash (worktrees only change under the per-workspace run lock); local-bound worktrees can be modified externally and are always re-hashed.
 
 ## Proto Workflow
 
@@ -96,6 +110,12 @@ cargo run -- run --workspace demo --expose-binary cat --expose-binary ls 'cat a.
 ```
 
 `--expose-binary` controls which external binaries are mounted inside the sandbox command `PATH`. Bash builtins such as `echo`, `cd`, and `test` must also be listed explicitly; known builtins are enabled inside bash without exposing same-name host binaries. Unlisted builtins are disabled before the user command runs. This is not a read-only policy and it does not parse bash syntax.
+
+### Threat Model
+
+The enforced security boundaries are the bubblewrap mount namespace (only the workspace, the exposed binaries, and read-only system libraries are visible), the Landlock execute allowlist (workspace-created files cannot be executed), and the seccomp filter (network syscalls are denied). These hold regardless of what the command does.
+
+The bash builtin disabling is **advisory, not a security boundary**: `/sandbox-runtime/bash` is itself on the Landlock execute allowlist, so a command can start a fresh bash (`/sandbox-runtime/bash -c ...`) where no builtins are disabled. Treat the builtin list as a guardrail that keeps well-behaved agents on the intended toolset, not as containment.
 
 Use read-only policy mode when the agent should inspect an existing workspace without writing files:
 
@@ -128,29 +148,6 @@ The bubblewrap runner:
 cargo run -- serve
 ```
 
-## Backend Adapter Shape
+## Storage
 
-The storage boundary is `ObjectBackend` in `src/backend.rs`:
-
-```rust
-#[async_trait]
-pub trait ObjectBackend: Send + Sync {
-    async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>>;
-    async fn put(&self, key: &str, bytes: &[u8]) -> anyhow::Result<()>;
-    async fn delete(&self, key: &str) -> anyhow::Result<()>;
-    fn kind(&self) -> BackendKind;
-}
-```
-
-Supported now:
-
-```text
-LocalObjectBackend
-```
-
-Reserved adapter slots:
-
-```text
-Aliyun OSS
-AWS S3
-```
+All daemon state is plain files under `--state-dir`: workspace metadata (`workspace.json`), operation logs (`ops/*.json`, written atomically), and managed worktrees. There is no object-storage abstraction; if content-addressed snapshots (restore to a recorded tree hash) become a real requirement, that layer should be designed against the operation log's before/after hashes rather than as a generic key-value backend.

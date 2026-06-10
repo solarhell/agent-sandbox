@@ -498,8 +498,17 @@ type RunRequest struct {
 	ExposedBinaries []string               `protobuf:"bytes,5,rep,name=exposed_binaries,json=exposedBinaries,proto3" json:"exposed_binaries,omitempty"`
 	TimeoutMs       uint64                 `protobuf:"varint,6,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
 	PolicyMode      PolicyMode             `protobuf:"varint,7,opt,name=policy_mode,json=policyMode,proto3,enum=agentsandbox.v1.PolicyMode" json:"policy_mode,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Per-stream output caps in bytes. 0 means the daemon default.
+	// The daemon truncates output server-side and sets the truncated flags,
+	// so responses never exceed gRPC message limits.
+	MaxStdoutBytes uint64 `protobuf:"varint,8,opt,name=max_stdout_bytes,json=maxStdoutBytes,proto3" json:"max_stdout_bytes,omitempty"`
+	MaxStderrBytes uint64 `protobuf:"varint,9,opt,name=max_stderr_bytes,json=maxStderrBytes,proto3" json:"max_stderr_bytes,omitempty"`
+	// Skip before/after tree hashing for this run. The operation log entry is
+	// still written, with empty tree hashes and changed=false. Use this when
+	// the caller does not consume tree hashes and the workspace is large.
+	SkipTreeHash  bool `protobuf:"varint,10,opt,name=skip_tree_hash,json=skipTreeHash,proto3" json:"skip_tree_hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunRequest) Reset() {
@@ -581,9 +590,30 @@ func (x *RunRequest) GetPolicyMode() PolicyMode {
 	return PolicyMode_POLICY_MODE_UNSPECIFIED
 }
 
+func (x *RunRequest) GetMaxStdoutBytes() uint64 {
+	if x != nil {
+		return x.MaxStdoutBytes
+	}
+	return 0
+}
+
+func (x *RunRequest) GetMaxStderrBytes() uint64 {
+	if x != nil {
+		return x.MaxStderrBytes
+	}
+	return 0
+}
+
+func (x *RunRequest) GetSkipTreeHash() bool {
+	if x != nil {
+		return x.SkipTreeHash
+	}
+	return false
+}
+
 type RunResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	ExitCode       int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	ExitCode       uint64                 `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
 	Stdout         []byte                 `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
 	Stderr         []byte                 `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
 	Runner         string                 `protobuf:"bytes,4,opt,name=runner,proto3" json:"runner,omitempty"`
@@ -592,8 +622,14 @@ type RunResponse struct {
 	AfterTreeHash  string                 `protobuf:"bytes,7,opt,name=after_tree_hash,json=afterTreeHash,proto3" json:"after_tree_hash,omitempty"`
 	Changed        bool                   `protobuf:"varint,8,opt,name=changed,proto3" json:"changed,omitempty"`
 	Audit          *RunAudit              `protobuf:"bytes,9,opt,name=audit,proto3" json:"audit,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Output was truncated server-side to the requested/default cap.
+	StdoutTruncated bool `protobuf:"varint,10,opt,name=stdout_truncated,json=stdoutTruncated,proto3" json:"stdout_truncated,omitempty"`
+	StderrTruncated bool `protobuf:"varint,11,opt,name=stderr_truncated,json=stderrTruncated,proto3" json:"stderr_truncated,omitempty"`
+	// The command hit its timeout and was killed. stdout/stderr hold the
+	// output produced before the kill; exit_code is 124.
+	TimedOut      bool `protobuf:"varint,12,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunResponse) Reset() {
@@ -626,7 +662,7 @@ func (*RunResponse) Descriptor() ([]byte, []int) {
 	return file_agentsandbox_v1_agent_sandbox_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *RunResponse) GetExitCode() int32 {
+func (x *RunResponse) GetExitCode() uint64 {
 	if x != nil {
 		return x.ExitCode
 	}
@@ -689,6 +725,27 @@ func (x *RunResponse) GetAudit() *RunAudit {
 	return nil
 }
 
+func (x *RunResponse) GetStdoutTruncated() bool {
+	if x != nil {
+		return x.StdoutTruncated
+	}
+	return false
+}
+
+func (x *RunResponse) GetStderrTruncated() bool {
+	if x != nil {
+		return x.StderrTruncated
+	}
+	return false
+}
+
+func (x *RunResponse) GetTimedOut() bool {
+	if x != nil {
+		return x.TimedOut
+	}
+	return false
+}
+
 type RunAudit struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	RequestId        string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -698,11 +755,12 @@ type RunAudit struct {
 	TimeoutMs        uint64                 `protobuf:"varint,5,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
 	DurationMs       uint64                 `protobuf:"varint,6,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
 	Runner           string                 `protobuf:"bytes,7,opt,name=runner,proto3" json:"runner,omitempty"`
-	StartedAtUnixMs  int64                  `protobuf:"varint,8,opt,name=started_at_unix_ms,json=startedAtUnixMs,proto3" json:"started_at_unix_ms,omitempty"`
-	FinishedAtUnixMs int64                  `protobuf:"varint,9,opt,name=finished_at_unix_ms,json=finishedAtUnixMs,proto3" json:"finished_at_unix_ms,omitempty"`
+	StartedAtUnixMs  uint64                 `protobuf:"varint,8,opt,name=started_at_unix_ms,json=startedAtUnixMs,proto3" json:"started_at_unix_ms,omitempty"`
+	FinishedAtUnixMs uint64                 `protobuf:"varint,9,opt,name=finished_at_unix_ms,json=finishedAtUnixMs,proto3" json:"finished_at_unix_ms,omitempty"`
 	StdoutBytes      uint64                 `protobuf:"varint,10,opt,name=stdout_bytes,json=stdoutBytes,proto3" json:"stdout_bytes,omitempty"`
 	StderrBytes      uint64                 `protobuf:"varint,11,opt,name=stderr_bytes,json=stderrBytes,proto3" json:"stderr_bytes,omitempty"`
 	PolicyMode       PolicyMode             `protobuf:"varint,12,opt,name=policy_mode,json=policyMode,proto3,enum=agentsandbox.v1.PolicyMode" json:"policy_mode,omitempty"`
+	TimedOut         bool                   `protobuf:"varint,13,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -786,14 +844,14 @@ func (x *RunAudit) GetRunner() string {
 	return ""
 }
 
-func (x *RunAudit) GetStartedAtUnixMs() int64 {
+func (x *RunAudit) GetStartedAtUnixMs() uint64 {
 	if x != nil {
 		return x.StartedAtUnixMs
 	}
 	return 0
 }
 
-func (x *RunAudit) GetFinishedAtUnixMs() int64 {
+func (x *RunAudit) GetFinishedAtUnixMs() uint64 {
 	if x != nil {
 		return x.FinishedAtUnixMs
 	}
@@ -819,6 +877,13 @@ func (x *RunAudit) GetPolicyMode() PolicyMode {
 		return x.PolicyMode
 	}
 	return PolicyMode_POLICY_MODE_UNSPECIFIED
+}
+
+func (x *RunAudit) GetTimedOut() bool {
+	if x != nil {
+		return x.TimedOut
+	}
+	return false
 }
 
 type StatusRequest struct {
@@ -921,7 +986,7 @@ type Operation struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	OpId           string                 `protobuf:"bytes,1,opt,name=op_id,json=opId,proto3" json:"op_id,omitempty"`
 	Command        string                 `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
-	ExitCode       int32                  `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	ExitCode       uint64                 `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
 	BeforeTreeHash string                 `protobuf:"bytes,4,opt,name=before_tree_hash,json=beforeTreeHash,proto3" json:"before_tree_hash,omitempty"`
 	AfterTreeHash  string                 `protobuf:"bytes,5,opt,name=after_tree_hash,json=afterTreeHash,proto3" json:"after_tree_hash,omitempty"`
 	Changed        bool                   `protobuf:"varint,6,opt,name=changed,proto3" json:"changed,omitempty"`
@@ -974,7 +1039,7 @@ func (x *Operation) GetCommand() string {
 	return ""
 }
 
-func (x *Operation) GetExitCode() int32 {
+func (x *Operation) GetExitCode() uint64 {
 	if x != nil {
 		return x.ExitCode
 	}
@@ -1012,7 +1077,7 @@ func (x *Operation) GetAudit() *RunAudit {
 type ListOperationsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	PageSize      uint32                 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageSize      uint64                 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	PageToken     string                 `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1055,7 +1120,7 @@ func (x *ListOperationsRequest) GetWorkspaceId() string {
 	return ""
 }
 
-func (x *ListOperationsRequest) GetPageSize() uint32 {
+func (x *ListOperationsRequest) GetPageSize() uint64 {
 	if x != nil {
 		return x.PageSize
 	}
@@ -1217,6 +1282,95 @@ func (x *GetOperationResponse) GetOperation() *Operation {
 	return nil
 }
 
+type DeleteWorkspaceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteWorkspaceRequest) Reset() {
+	*x = DeleteWorkspaceRequest{}
+	mi := &file_agentsandbox_v1_agent_sandbox_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteWorkspaceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteWorkspaceRequest) ProtoMessage() {}
+
+func (x *DeleteWorkspaceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agentsandbox_v1_agent_sandbox_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteWorkspaceRequest.ProtoReflect.Descriptor instead.
+func (*DeleteWorkspaceRequest) Descriptor() ([]byte, []int) {
+	return file_agentsandbox_v1_agent_sandbox_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *DeleteWorkspaceRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+type DeleteWorkspaceResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False when the workspace did not exist; the call still succeeds.
+	Deleted       bool `protobuf:"varint,1,opt,name=deleted,proto3" json:"deleted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteWorkspaceResponse) Reset() {
+	*x = DeleteWorkspaceResponse{}
+	mi := &file_agentsandbox_v1_agent_sandbox_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteWorkspaceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteWorkspaceResponse) ProtoMessage() {}
+
+func (x *DeleteWorkspaceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_agentsandbox_v1_agent_sandbox_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteWorkspaceResponse.ProtoReflect.Descriptor instead.
+func (*DeleteWorkspaceResponse) Descriptor() ([]byte, []int) {
+	return file_agentsandbox_v1_agent_sandbox_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *DeleteWorkspaceResponse) GetDeleted() bool {
+	if x != nil {
+		return x.Deleted
+	}
+	return false
+}
+
 var File_agentsandbox_v1_agent_sandbox_proto protoreflect.FileDescriptor
 
 const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
@@ -1241,7 +1395,7 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12*\n" +
 	"\x11create_if_missing\x18\x02 \x01(\bR\x0fcreateIfMissing\"Q\n" +
 	"\x15BindWorkspaceResponse\x128\n" +
-	"\tworkspace\x18\x01 \x01(\v2\x1a.agentsandbox.v1.WorkspaceR\tworkspace\"\xd3\x02\n" +
+	"\tworkspace\x18\x01 \x01(\v2\x1a.agentsandbox.v1.WorkspaceR\tworkspace\"\xcd\x03\n" +
 	"\n" +
 	"RunRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x18\n" +
@@ -1252,12 +1406,16 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\n" +
 	"timeout_ms\x18\x06 \x01(\x04R\ttimeoutMs\x12<\n" +
 	"\vpolicy_mode\x18\a \x01(\x0e2\x1b.agentsandbox.v1.PolicyModeR\n" +
-	"policyMode\x1a6\n" +
+	"policyMode\x12(\n" +
+	"\x10max_stdout_bytes\x18\b \x01(\x04R\x0emaxStdoutBytes\x12(\n" +
+	"\x10max_stderr_bytes\x18\t \x01(\x04R\x0emaxStderrBytes\x12$\n" +
+	"\x0eskip_tree_hash\x18\n" +
+	" \x01(\bR\fskipTreeHash\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa4\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x97\x03\n" +
 	"\vRunResponse\x12\x1b\n" +
-	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
+	"\texit_code\x18\x01 \x01(\x04R\bexitCode\x12\x16\n" +
 	"\x06stdout\x18\x02 \x01(\fR\x06stdout\x12\x16\n" +
 	"\x06stderr\x18\x03 \x01(\fR\x06stderr\x12\x16\n" +
 	"\x06runner\x18\x04 \x01(\tR\x06runner\x12\x13\n" +
@@ -1265,7 +1423,11 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\x10before_tree_hash\x18\x06 \x01(\tR\x0ebeforeTreeHash\x12&\n" +
 	"\x0fafter_tree_hash\x18\a \x01(\tR\rafterTreeHash\x12\x18\n" +
 	"\achanged\x18\b \x01(\bR\achanged\x12/\n" +
-	"\x05audit\x18\t \x01(\v2\x19.agentsandbox.v1.RunAuditR\x05audit\"\xc1\x03\n" +
+	"\x05audit\x18\t \x01(\v2\x19.agentsandbox.v1.RunAuditR\x05audit\x12)\n" +
+	"\x10stdout_truncated\x18\n" +
+	" \x01(\bR\x0fstdoutTruncated\x12)\n" +
+	"\x10stderr_truncated\x18\v \x01(\bR\x0fstderrTruncated\x12\x1b\n" +
+	"\ttimed_out\x18\f \x01(\bR\btimedOut\"\xde\x03\n" +
 	"\bRunAudit\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12!\n" +
@@ -1277,13 +1439,14 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\vduration_ms\x18\x06 \x01(\x04R\n" +
 	"durationMs\x12\x16\n" +
 	"\x06runner\x18\a \x01(\tR\x06runner\x12+\n" +
-	"\x12started_at_unix_ms\x18\b \x01(\x03R\x0fstartedAtUnixMs\x12-\n" +
-	"\x13finished_at_unix_ms\x18\t \x01(\x03R\x10finishedAtUnixMs\x12!\n" +
+	"\x12started_at_unix_ms\x18\b \x01(\x04R\x0fstartedAtUnixMs\x12-\n" +
+	"\x13finished_at_unix_ms\x18\t \x01(\x04R\x10finishedAtUnixMs\x12!\n" +
 	"\fstdout_bytes\x18\n" +
 	" \x01(\x04R\vstdoutBytes\x12!\n" +
 	"\fstderr_bytes\x18\v \x01(\x04R\vstderrBytes\x12<\n" +
 	"\vpolicy_mode\x18\f \x01(\x0e2\x1b.agentsandbox.v1.PolicyModeR\n" +
-	"policyMode\"2\n" +
+	"policyMode\x12\x1b\n" +
+	"\ttimed_out\x18\r \x01(\bR\btimedOut\"2\n" +
 	"\rStatusRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\"b\n" +
 	"\x0eStatusResponse\x128\n" +
@@ -1292,14 +1455,14 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\tOperation\x12\x13\n" +
 	"\x05op_id\x18\x01 \x01(\tR\x04opId\x12\x18\n" +
 	"\acommand\x18\x02 \x01(\tR\acommand\x12\x1b\n" +
-	"\texit_code\x18\x03 \x01(\x05R\bexitCode\x12(\n" +
+	"\texit_code\x18\x03 \x01(\x04R\bexitCode\x12(\n" +
 	"\x10before_tree_hash\x18\x04 \x01(\tR\x0ebeforeTreeHash\x12&\n" +
 	"\x0fafter_tree_hash\x18\x05 \x01(\tR\rafterTreeHash\x12\x18\n" +
 	"\achanged\x18\x06 \x01(\bR\achanged\x12/\n" +
 	"\x05audit\x18\a \x01(\v2\x19.agentsandbox.v1.RunAuditR\x05audit\"v\n" +
 	"\x15ListOperationsRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
-	"\tpage_size\x18\x02 \x01(\rR\bpageSize\x12\x1d\n" +
+	"\tpage_size\x18\x02 \x01(\x04R\bpageSize\x12\x1d\n" +
 	"\n" +
 	"page_token\x18\x03 \x01(\tR\tpageToken\"|\n" +
 	"\x16ListOperationsResponse\x12:\n" +
@@ -1311,7 +1474,11 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x13\n" +
 	"\x05op_id\x18\x02 \x01(\tR\x04opId\"P\n" +
 	"\x14GetOperationResponse\x128\n" +
-	"\toperation\x18\x01 \x01(\v2\x1a.agentsandbox.v1.OperationR\toperation*k\n" +
+	"\toperation\x18\x01 \x01(\v2\x1a.agentsandbox.v1.OperationR\toperation\";\n" +
+	"\x16DeleteWorkspaceRequest\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\"3\n" +
+	"\x17DeleteWorkspaceResponse\x12\x18\n" +
+	"\adeleted\x18\x01 \x01(\bR\adeleted*k\n" +
 	"\rWorkspaceKind\x12\x1e\n" +
 	"\x1aWORKSPACE_KIND_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16WORKSPACE_KIND_MANAGED\x10\x01\x12\x1e\n" +
@@ -1320,14 +1487,15 @@ const file_agentsandbox_v1_agent_sandbox_proto_rawDesc = "" +
 	"PolicyMode\x12\x1b\n" +
 	"\x17POLICY_MODE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16POLICY_MODE_READ_WRITE\x10\x01\x12\x19\n" +
-	"\x15POLICY_MODE_READ_ONLY\x10\x022\xa8\x04\n" +
+	"\x15POLICY_MODE_READ_ONLY\x10\x022\x8e\x05\n" +
 	"\x13AgentSandboxService\x12d\n" +
 	"\x0fCreateWorkspace\x12'.agentsandbox.v1.CreateWorkspaceRequest\x1a(.agentsandbox.v1.CreateWorkspaceResponse\x12^\n" +
 	"\rBindWorkspace\x12%.agentsandbox.v1.BindWorkspaceRequest\x1a&.agentsandbox.v1.BindWorkspaceResponse\x12@\n" +
 	"\x03Run\x12\x1b.agentsandbox.v1.RunRequest\x1a\x1c.agentsandbox.v1.RunResponse\x12I\n" +
 	"\x06Status\x12\x1e.agentsandbox.v1.StatusRequest\x1a\x1f.agentsandbox.v1.StatusResponse\x12a\n" +
 	"\x0eListOperations\x12&.agentsandbox.v1.ListOperationsRequest\x1a'.agentsandbox.v1.ListOperationsResponse\x12[\n" +
-	"\fGetOperation\x12$.agentsandbox.v1.GetOperationRequest\x1a%.agentsandbox.v1.GetOperationResponseBPZNgithub.com/solarhell/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1b\x06proto3"
+	"\fGetOperation\x12$.agentsandbox.v1.GetOperationRequest\x1a%.agentsandbox.v1.GetOperationResponse\x12d\n" +
+	"\x0fDeleteWorkspace\x12'.agentsandbox.v1.DeleteWorkspaceRequest\x1a(.agentsandbox.v1.DeleteWorkspaceResponseBPZNgithub.com/solarhell/agent-sandbox/sdk/go/proto/agentsandbox/v1;agentsandboxv1b\x06proto3"
 
 var (
 	file_agentsandbox_v1_agent_sandbox_proto_rawDescOnce sync.Once
@@ -1342,7 +1510,7 @@ func file_agentsandbox_v1_agent_sandbox_proto_rawDescGZIP() []byte {
 }
 
 var file_agentsandbox_v1_agent_sandbox_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_agentsandbox_v1_agent_sandbox_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_agentsandbox_v1_agent_sandbox_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_agentsandbox_v1_agent_sandbox_proto_goTypes = []any{
 	(WorkspaceKind)(0),              // 0: agentsandbox.v1.WorkspaceKind
 	(PolicyMode)(0),                 // 1: agentsandbox.v1.PolicyMode
@@ -1363,7 +1531,9 @@ var file_agentsandbox_v1_agent_sandbox_proto_goTypes = []any{
 	(*ListOperationsResponse)(nil),  // 16: agentsandbox.v1.ListOperationsResponse
 	(*GetOperationRequest)(nil),     // 17: agentsandbox.v1.GetOperationRequest
 	(*GetOperationResponse)(nil),    // 18: agentsandbox.v1.GetOperationResponse
-	nil,                             // 19: agentsandbox.v1.RunRequest.EnvEntry
+	(*DeleteWorkspaceRequest)(nil),  // 19: agentsandbox.v1.DeleteWorkspaceRequest
+	(*DeleteWorkspaceResponse)(nil), // 20: agentsandbox.v1.DeleteWorkspaceResponse
+	nil,                             // 21: agentsandbox.v1.RunRequest.EnvEntry
 }
 var file_agentsandbox_v1_agent_sandbox_proto_depIdxs = []int32{
 	4,  // 0: agentsandbox.v1.CreateWorkspaceResponse.workspace:type_name -> agentsandbox.v1.Workspace
@@ -1371,7 +1541,7 @@ var file_agentsandbox_v1_agent_sandbox_proto_depIdxs = []int32{
 	6,  // 2: agentsandbox.v1.BindWorkspaceRequest.binding:type_name -> agentsandbox.v1.WorkspaceBinding
 	7,  // 3: agentsandbox.v1.WorkspaceBinding.local:type_name -> agentsandbox.v1.LocalWorkspaceBinding
 	4,  // 4: agentsandbox.v1.BindWorkspaceResponse.workspace:type_name -> agentsandbox.v1.Workspace
-	19, // 5: agentsandbox.v1.RunRequest.env:type_name -> agentsandbox.v1.RunRequest.EnvEntry
+	21, // 5: agentsandbox.v1.RunRequest.env:type_name -> agentsandbox.v1.RunRequest.EnvEntry
 	1,  // 6: agentsandbox.v1.RunRequest.policy_mode:type_name -> agentsandbox.v1.PolicyMode
 	11, // 7: agentsandbox.v1.RunResponse.audit:type_name -> agentsandbox.v1.RunAudit
 	1,  // 8: agentsandbox.v1.RunAudit.policy_mode:type_name -> agentsandbox.v1.PolicyMode
@@ -1385,14 +1555,16 @@ var file_agentsandbox_v1_agent_sandbox_proto_depIdxs = []int32{
 	12, // 16: agentsandbox.v1.AgentSandboxService.Status:input_type -> agentsandbox.v1.StatusRequest
 	15, // 17: agentsandbox.v1.AgentSandboxService.ListOperations:input_type -> agentsandbox.v1.ListOperationsRequest
 	17, // 18: agentsandbox.v1.AgentSandboxService.GetOperation:input_type -> agentsandbox.v1.GetOperationRequest
-	3,  // 19: agentsandbox.v1.AgentSandboxService.CreateWorkspace:output_type -> agentsandbox.v1.CreateWorkspaceResponse
-	8,  // 20: agentsandbox.v1.AgentSandboxService.BindWorkspace:output_type -> agentsandbox.v1.BindWorkspaceResponse
-	10, // 21: agentsandbox.v1.AgentSandboxService.Run:output_type -> agentsandbox.v1.RunResponse
-	13, // 22: agentsandbox.v1.AgentSandboxService.Status:output_type -> agentsandbox.v1.StatusResponse
-	16, // 23: agentsandbox.v1.AgentSandboxService.ListOperations:output_type -> agentsandbox.v1.ListOperationsResponse
-	18, // 24: agentsandbox.v1.AgentSandboxService.GetOperation:output_type -> agentsandbox.v1.GetOperationResponse
-	19, // [19:25] is the sub-list for method output_type
-	13, // [13:19] is the sub-list for method input_type
+	19, // 19: agentsandbox.v1.AgentSandboxService.DeleteWorkspace:input_type -> agentsandbox.v1.DeleteWorkspaceRequest
+	3,  // 20: agentsandbox.v1.AgentSandboxService.CreateWorkspace:output_type -> agentsandbox.v1.CreateWorkspaceResponse
+	8,  // 21: agentsandbox.v1.AgentSandboxService.BindWorkspace:output_type -> agentsandbox.v1.BindWorkspaceResponse
+	10, // 22: agentsandbox.v1.AgentSandboxService.Run:output_type -> agentsandbox.v1.RunResponse
+	13, // 23: agentsandbox.v1.AgentSandboxService.Status:output_type -> agentsandbox.v1.StatusResponse
+	16, // 24: agentsandbox.v1.AgentSandboxService.ListOperations:output_type -> agentsandbox.v1.ListOperationsResponse
+	18, // 25: agentsandbox.v1.AgentSandboxService.GetOperation:output_type -> agentsandbox.v1.GetOperationResponse
+	20, // 26: agentsandbox.v1.AgentSandboxService.DeleteWorkspace:output_type -> agentsandbox.v1.DeleteWorkspaceResponse
+	20, // [20:27] is the sub-list for method output_type
+	13, // [13:20] is the sub-list for method input_type
 	13, // [13:13] is the sub-list for extension type_name
 	13, // [13:13] is the sub-list for extension extendee
 	0,  // [0:13] is the sub-list for field type_name
@@ -1412,7 +1584,7 @@ func file_agentsandbox_v1_agent_sandbox_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentsandbox_v1_agent_sandbox_proto_rawDesc), len(file_agentsandbox_v1_agent_sandbox_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   18,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -98,10 +98,10 @@ mod imp {
     pub const PROBE_ARG: &str = "__agent-sandbox-landlock-probe";
 
     pub fn maybe_run_helper() -> anyhow::Result<bool> {
-        if let Some(arg) = std::env::args_os().nth(1) {
-            if arg == std::ffi::OsStr::new(HELPER_ARG) || arg == std::ffi::OsStr::new(PROBE_ARG) {
-                anyhow::bail!("Landlock helpers are only supported on Linux");
-            }
+        if let Some(arg) = std::env::args_os().nth(1)
+            && (arg == std::ffi::OsStr::new(HELPER_ARG) || arg == std::ffi::OsStr::new(PROBE_ARG))
+        {
+            anyhow::bail!("Landlock helpers are only supported on Linux");
         }
         Ok(false)
     }

@@ -25,6 +25,7 @@ const (
 	AgentSandboxService_Status_FullMethodName          = "/agentsandbox.v1.AgentSandboxService/Status"
 	AgentSandboxService_ListOperations_FullMethodName  = "/agentsandbox.v1.AgentSandboxService/ListOperations"
 	AgentSandboxService_GetOperation_FullMethodName    = "/agentsandbox.v1.AgentSandboxService/GetOperation"
+	AgentSandboxService_DeleteWorkspace_FullMethodName = "/agentsandbox.v1.AgentSandboxService/DeleteWorkspace"
 )
 
 // AgentSandboxServiceClient is the client API for AgentSandboxService service.
@@ -37,6 +38,7 @@ type AgentSandboxServiceClient interface {
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	ListOperations(ctx context.Context, in *ListOperationsRequest, opts ...grpc.CallOption) (*ListOperationsResponse, error)
 	GetOperation(ctx context.Context, in *GetOperationRequest, opts ...grpc.CallOption) (*GetOperationResponse, error)
+	DeleteWorkspace(ctx context.Context, in *DeleteWorkspaceRequest, opts ...grpc.CallOption) (*DeleteWorkspaceResponse, error)
 }
 
 type agentSandboxServiceClient struct {
@@ -107,6 +109,16 @@ func (c *agentSandboxServiceClient) GetOperation(ctx context.Context, in *GetOpe
 	return out, nil
 }
 
+func (c *agentSandboxServiceClient) DeleteWorkspace(ctx context.Context, in *DeleteWorkspaceRequest, opts ...grpc.CallOption) (*DeleteWorkspaceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteWorkspaceResponse)
+	err := c.cc.Invoke(ctx, AgentSandboxService_DeleteWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentSandboxServiceServer is the server API for AgentSandboxService service.
 // All implementations must embed UnimplementedAgentSandboxServiceServer
 // for forward compatibility.
@@ -117,6 +129,7 @@ type AgentSandboxServiceServer interface {
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	ListOperations(context.Context, *ListOperationsRequest) (*ListOperationsResponse, error)
 	GetOperation(context.Context, *GetOperationRequest) (*GetOperationResponse, error)
+	DeleteWorkspace(context.Context, *DeleteWorkspaceRequest) (*DeleteWorkspaceResponse, error)
 	mustEmbedUnimplementedAgentSandboxServiceServer()
 }
 
@@ -144,6 +157,9 @@ func (UnimplementedAgentSandboxServiceServer) ListOperations(context.Context, *L
 }
 func (UnimplementedAgentSandboxServiceServer) GetOperation(context.Context, *GetOperationRequest) (*GetOperationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetOperation not implemented")
+}
+func (UnimplementedAgentSandboxServiceServer) DeleteWorkspace(context.Context, *DeleteWorkspaceRequest) (*DeleteWorkspaceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteWorkspace not implemented")
 }
 func (UnimplementedAgentSandboxServiceServer) mustEmbedUnimplementedAgentSandboxServiceServer() {}
 func (UnimplementedAgentSandboxServiceServer) testEmbeddedByValue()                             {}
@@ -274,6 +290,24 @@ func _AgentSandboxService_GetOperation_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentSandboxService_DeleteWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentSandboxServiceServer).DeleteWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentSandboxService_DeleteWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentSandboxServiceServer).DeleteWorkspace(ctx, req.(*DeleteWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentSandboxService_ServiceDesc is the grpc.ServiceDesc for AgentSandboxService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -304,6 +338,10 @@ var AgentSandboxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetOperation",
 			Handler:    _AgentSandboxService_GetOperation_Handler,
+		},
+		{
+			MethodName: "DeleteWorkspace",
+			Handler:    _AgentSandboxService_DeleteWorkspace_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
